@@ -1,0 +1,12 @@
+[project]
+name = "linear-auto-agent"
+version = "0.1.0"
+description = "Fetch open Linear issues, triage via cursor agent, auto-implement easy ones on local git worktrees"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "python-dotenv",
+]
+
+[project.scripts]
+linear-auto-agent = "scout_agent:main"
