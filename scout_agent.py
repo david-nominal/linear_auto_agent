@@ -262,35 +262,47 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
     if log_path:
         log(f"Log: {log_path}", issue=issue_hint)
 
+    max_security_retries = 2
     t0 = time.monotonic()
-    output_chunks: list[str] = []
-    log_file = open(log_path, "w") if log_path else None
-    timed_out = False
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            output_chunks.append(line)
+
+    for attempt in range(max_security_retries + 1):
+        output_chunks: list[str] = []
+        log_file = open(log_path, "w") if log_path else None
+        timed_out = False
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                output_chunks.append(line)
+                if log_file:
+                    log_file.write(line)
+                    log_file.flush()
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+        finally:
             if log_file:
-                log_file.write(line)
-                log_file.flush()
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        proc.wait()
-    finally:
-        if log_file:
-            log_file.close()
+                log_file.close()
+
+        exit_code = proc.returncode or 0
+        output = "".join(output_chunks)
+
+        if exit_code != 0 and "Security" in output and attempt < max_security_retries:
+            delay = 2 * (attempt + 1)
+            log(f"Security error on attempt {attempt + 1}, retrying in {delay}s...", issue=issue_hint)
+            time.sleep(delay)
+            continue
+        break
 
     elapsed = time.monotonic() - t0
-    exit_code = proc.returncode or 0
     status_str = "TIMEOUT" if timed_out else ("OK" if exit_code == 0 else f"FAILED(exit={exit_code})")
     log(f"Agent finished: {status_str} in {_fmt_duration(elapsed)}", issue=issue_hint)
 
-    return exit_code, "".join(output_chunks)
+    return exit_code, output
 
 
 def parse_json_from_output(output: str) -> dict | None:
@@ -349,31 +361,41 @@ You MUST output ONLY a JSON block (no other text) in this exact format:
 """
 
 
+TRIAGE_MAX_RETRIES = int(os.environ.get("TRIAGE_MAX_RETRIES", "2"))
+
+
 def triage_issue(issue: dict, workspace: str) -> dict:
     """Triage a single issue. Returns the parsed decision dict."""
     prompt = TRIAGE_PROMPT.format(**issue)
     model = os.environ.get("TRIAGE_MODEL") or None
-    exit_code, output = run_cursor_agent(prompt, mode="ask", workspace=workspace,
-                                         log_name=f"{issue['id']}-triage",
-                                         timeout=TRIAGE_TIMEOUT, model=model)
 
-    if exit_code != 0:
-        tail = output.strip()[-500:] if output.strip() else "(no output)"
-        log(f"Agent failed (exit={exit_code}). Last output:\n    {tail}", issue=issue["id"], file=sys.stderr)
+    for attempt in range(TRIAGE_MAX_RETRIES + 1):
+        exit_code, output = run_cursor_agent(prompt, mode="ask", workspace=workspace,
+                                             log_name=f"{issue['id']}-triage",
+                                             timeout=TRIAGE_TIMEOUT, model=model)
 
-    parsed = parse_json_from_output(output)
-    if parsed and "decision" in parsed:
-        if "repos" not in parsed:
-            parsed["repos"] = ["backend"]
-        if "pr_type" not in parsed:
-            parsed["pr_type"] = "feat"
-        return parsed
+        if exit_code != 0:
+            tail = output.strip()[-500:] if output.strip() else "(no output)"
+            log(f"Agent failed (exit={exit_code}). Last output:\n    {tail}", issue=issue["id"], file=sys.stderr)
+
+        parsed = parse_json_from_output(output)
+        if parsed and "decision" in parsed:
+            if "repos" not in parsed:
+                parsed["repos"] = ["backend"]
+            if "pr_type" not in parsed:
+                parsed["pr_type"] = "feat"
+            return parsed
+
+        if attempt < TRIAGE_MAX_RETRIES:
+            delay = 3 * (attempt + 1)
+            log(f"Triage attempt {attempt + 1} failed, retrying in {delay}s...", issue=issue["id"])
+            time.sleep(delay)
 
     return {
-        "decision": "needs_clarification",
+        "decision": "triage_failed",
         "repos": [],
         "pr_type": "feat",
-        "reasoning": f"Failed to parse agent output (exit={exit_code})",
+        "reasoning": f"Failed to parse agent output after {TRIAGE_MAX_RETRIES + 1} attempts (exit={exit_code})",
     }
 
 
@@ -880,7 +902,8 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
     status_order = {
         "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
-        "failed": 4, "easy": 5, "medium": 6, "needs_clarification": 7, "complex_skip": 8,
+        "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
+        "needs_clarification": 8, "complex_skip": 9,
     }
     sorted_items = sorted(tracked.values(), key=lambda t: status_order.get(t["status"], 99))
 
@@ -994,6 +1017,76 @@ def cmd_implement(args: argparse.Namespace) -> None:
 
     elapsed = time.monotonic() - t0
     log(f"Implementation complete in {_fmt_duration(elapsed)}: {succeeded}/{total} succeeded")
+
+
+def cmd_retry(args: argparse.Namespace) -> None:
+    """Retry failed triage or implementation for specific issues (or all failed)."""
+    tracked = load_all_tracking()
+    workspace = str(ensure_workspace_symlinks())
+
+    if args.issue_ids:
+        issue_ids = args.issue_ids
+    else:
+        issue_ids = [
+            t["issue_id"] for t in tracked.values()
+            if t["status"] in ("triage_failed", "failed")
+        ]
+
+    if not issue_ids:
+        log("No failed issues to retry.")
+        return
+
+    triage_targets = []
+    impl_targets = []
+    for iid in issue_ids:
+        t = tracked.get(iid)
+        if not t:
+            log(f"Not found in tracking", issue=iid)
+            continue
+        if t["status"] == "triage_failed":
+            triage_targets.append(t)
+        elif t["status"] == "failed":
+            impl_targets.append(t)
+        else:
+            log(f"Status is '{t['status']}', nothing to retry", issue=iid)
+
+    if triage_targets:
+        log(f"Re-triaging {len(triage_targets)} issue(s)...")
+        issues_by_id = {i["id"]: i for i in fetch_issues()}
+        workers = getattr(args, "workers", DEFAULT_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for t in triage_targets:
+                issue = issues_by_id.get(t["issue_id"])
+                if not issue:
+                    issue = {"id": t["issue_id"], "title": t["title"],
+                             "description": t.get("description", ""), "url": t["url"]}
+                futures[pool.submit(_triage_and_plan_issue, issue, workspace)] = t
+            for future in as_completed(futures):
+                orig = futures[future]
+                try:
+                    new_data = future.result()
+                    save_tracking(orig["issue_id"], new_data)
+                    log(f"Re-triage result: {new_data['decision']}", issue=orig["issue_id"])
+                except Exception as exc:
+                    log(f"Re-triage failed: {exc}", issue=orig["issue_id"], file=sys.stderr)
+
+    if impl_targets:
+        log(f"Re-implementing {len(impl_targets)} issue(s)...")
+        for t in impl_targets:
+            t["status"] = "approved"
+            save_tracking(t["issue_id"], t)
+        workers = getattr(args, "workers", DEFAULT_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_implement_issue, t): t for t in impl_targets}
+            for future in as_completed(futures):
+                orig = futures[future]
+                try:
+                    updated = future.result()
+                    save_tracking(updated["issue_id"], updated)
+                    log(f"Re-implementation: {updated['status']}", issue=updated["issue_id"])
+                except Exception as exc:
+                    log(f"Re-implementation failed: {exc}", issue=orig["issue_id"], file=sys.stderr)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -1329,6 +1422,11 @@ def main():
     p_revise.add_argument("issue_ids", nargs="*", help="Issue identifiers to revise (default: all pushed)")
     _add_workers_arg(p_revise)
     p_revise.set_defaults(func=cmd_revise)
+
+    p_retry = sub.add_parser("retry", help="Retry failed triage or implementation")
+    p_retry.add_argument("issue_ids", nargs="*", help="Issue identifiers to retry (default: all failed)")
+    _add_workers_arg(p_retry)
+    p_retry.set_defaults(func=cmd_retry)
 
     p_show = sub.add_parser("show", help="Show full details for an issue")
     p_show.add_argument("issue_id", help="Issue identifier")
