@@ -291,9 +291,12 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
         exit_code = proc.returncode or 0
         output = "".join(output_chunks)
 
-        if exit_code != 0 and "Security" in output and attempt < max_security_retries:
+        is_keychain_error = exit_code != 0 and (
+            "Security" in output or "Password not found" in output
+        )
+        if is_keychain_error and attempt < max_security_retries:
             delay = 2 * (attempt + 1)
-            log(f"Security error on attempt {attempt + 1}, retrying in {delay}s...", issue=issue_hint)
+            log(f"Keychain error on attempt {attempt + 1}, retrying in {delay}s...", issue=issue_hint)
             time.sleep(delay)
             continue
         break
