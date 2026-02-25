@@ -715,6 +715,32 @@ ensure your changes stay consistent with the overall intent.
 """
 
 
+def resolve_pr_threads(thread_ids: list[str], issue_id: str = "") -> int:
+    """Resolve review threads by ID via GitHub GraphQL. Returns count of resolved threads."""
+    resolved = 0
+    for tid in thread_ids:
+        if not tid:
+            continue
+        mutation = """
+        mutation($threadId: ID!) {
+          resolveReviewThread(input: {threadId: $threadId}) {
+            thread { isResolved }
+          }
+        }
+        """
+        result = subprocess.run(
+            ["gh", "api", "graphql",
+             "-f", f"query={mutation}",
+             "-F", f"threadId={tid}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            resolved += 1
+        else:
+            log(f"Failed to resolve thread {tid}: {result.stderr[:200]}", issue=issue_id)
+    return resolved
+
+
 def _parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     """Extract (owner, repo, number) from a GitHub PR URL."""
     match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
@@ -738,6 +764,7 @@ def fetch_pr_comments(pr_url: str) -> list[dict]:
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
             nodes {
+              id
               isResolved
               comments(first: 10) {
                 nodes {
@@ -795,6 +822,7 @@ def fetch_pr_comments(pr_url: str) -> list[dict]:
             body_parts.append(f"\n> Reply from {author}: {reply.get('body', '')}")
 
         comments.append({
+            "thread_id": thread.get("id"),
             "path": first.get("path"),
             "line": first.get("line"),
             "author": first.get("author", {}).get("login", "unknown"),
@@ -1350,6 +1378,11 @@ def _revise_issue(tracking: dict) -> dict:
             continue
 
         log(f"{repo_key}: revision pushed successfully", issue=issue_id)
+
+        thread_ids = [c.get("thread_id") for c in comments if c.get("thread_id")]
+        if thread_ids:
+            resolved = resolve_pr_threads(thread_ids, issue_id=issue_id)
+            log(f"{repo_key}: resolved {resolved}/{len(thread_ids)} review thread(s)", issue=issue_id)
         revisions.append({
             "repo": repo_key,
             "comments_addressed": len(comments),
