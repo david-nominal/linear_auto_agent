@@ -956,23 +956,26 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
     id_w = max(len(t["issue_id"]) for t in sorted_items)
     st_w = max(len(t["status"]) for t in sorted_items)
+    cx_w = max((len(t.get("decision") or "-") for t in sorted_items), default=4)
+    cx_w = max(cx_w, len("Complexity"))
 
-    print(f"{'Issue':<{id_w}}  {'Status':<{st_w}}  {'Repos':<12}  Summary")
-    print(f"{'-' * id_w}  {'-' * st_w}  {'-' * 12}  {'-' * 50}")
+    print(f"{'Issue':<{id_w}}  {'Status':<{st_w}}  {'Complexity':<{cx_w}}  {'Repos':<12}  Summary")
+    print(f"{'-' * id_w}  {'-' * st_w}  {'-' * cx_w}  {'-' * 12}  {'-' * 50}")
 
     for t in sorted_items:
         repos = ",".join(t.get("repos", []))[:12] or "-"
+        complexity = t.get("decision") or "-"
         summary = ""
         if t["status"] == "awaiting_approval":
-            summary = (t.get("plan_summary") or t.get("plan", "") or "")[:70].replace("\n", " ")
+            summary = (t.get("plan_summary") or t.get("plan", "") or "").replace("\n", " ")
         elif t.get("reasoning"):
-            summary = t["reasoning"][:70]
+            summary = t["reasoning"]
         impls = t.get("implementations", {})
         if impls:
             branches = [v.get("worktree_branch", "") for v in impls.values() if isinstance(v, dict)]
             if branches:
                 summary = f"[{', '.join(branches)}] {summary}"
-        print(f"{t['issue_id']:<{id_w}}  {t['status']:<{st_w}}  {repos:<12}  {summary}")
+        print(f"{t['issue_id']:<{id_w}}  {t['status']:<{st_w}}  {complexity:<{cx_w}}  {repos:<12}  {summary}")
 
 
 def cmd_approve(args: argparse.Namespace) -> None:
