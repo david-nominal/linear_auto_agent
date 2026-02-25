@@ -7,6 +7,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +30,36 @@ REPOS = {
     "backend": {"env_var": "BACKEND_REPO", "symlink_name": "scout", "description": "Java backend"},
     "frontend": {"env_var": "FRONTEND_REPO", "symlink_name": "galaxy", "description": "TypeScript frontend"},
 }
+
+TRIAGE_TIMEOUT = 60
+PLAN_TIMEOUT = 120
+IMPL_TIMEOUT = 600
+DEFAULT_WORKERS = 3
+
+
+_start_time = time.monotonic()
+_log_lock = threading.Lock()
+
+
+def _ts() -> str:
+    elapsed = time.monotonic() - _start_time
+    m, s = divmod(int(elapsed), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def log(msg: str, *, issue: str = "", file=None) -> None:
+    prefix = f"[{_ts()}]"
+    if issue:
+        prefix += f" [{issue}]"
+    with _log_lock:
+        print(f"{prefix} {msg}", file=file, flush=True)
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m {s:02d}s"
 
 
 def now_iso() -> str:
@@ -184,7 +217,8 @@ def load_all_tracking() -> dict[str, dict]:
 
 def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | None = None,
                      yolo: bool = False, sandbox: bool = False,
-                     log_name: str | None = None) -> tuple[int, str]:
+                     log_name: str | None = None, timeout: int = IMPL_TIMEOUT,
+                     model: str | None = None) -> tuple[int, str]:
     """Run cursor agent CLI and return (exit_code, output).
 
     Security:
@@ -202,6 +236,8 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
 
     if mode:
         cmd += ["--mode", mode]
+    if model:
+        cmd += ["--model", model]
     if workspace:
         cmd += ["--workspace", workspace]
     if yolo:
@@ -216,12 +252,19 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         log_path = LOGS_DIR / f"{log_name}.log"
 
-    print(f"  Running cursor agent ({mode or 'default'} mode, sandbox={'on' if sandbox else 'off'})...")
-    if log_path:
-        print(f"  Log: {log_path}")
+    issue_hint = ""
+    if log_name:
+        issue_hint = log_name.split("-triage")[0].split("-plan")[0].split("-backend")[0].split("-frontend")[0].split("-revise")[0]
 
+    log(f"Agent starting ({mode or 'default'} mode, sandbox={'on' if sandbox else 'off'}, timeout={timeout}s)",
+        issue=issue_hint)
+    if log_path:
+        log(f"Log: {log_path}", issue=issue_hint)
+
+    t0 = time.monotonic()
     output_chunks: list[str] = []
     log_file = open(log_path, "w") if log_path else None
+    timed_out = False
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -232,15 +275,21 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
             if log_file:
                 log_file.write(line)
                 log_file.flush()
-        proc.wait(timeout=600)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        timed_out = True
         proc.kill()
         proc.wait()
     finally:
         if log_file:
             log_file.close()
 
-    return proc.returncode or 0, "".join(output_chunks)
+    elapsed = time.monotonic() - t0
+    exit_code = proc.returncode or 0
+    status_str = "TIMEOUT" if timed_out else ("OK" if exit_code == 0 else f"FAILED(exit={exit_code})")
+    log(f"Agent finished: {status_str} in {_fmt_duration(elapsed)}", issue=issue_hint)
+
+    return exit_code, "".join(output_chunks)
 
 
 def parse_json_from_output(output: str) -> dict | None:
@@ -282,14 +331,17 @@ The workspace contains two repos:
 ## Instructions
 
 1. Is this task well-defined enough to implement without asking clarifying questions?
-2. If yes, is it an easy task (isolated change, < ~1 hour of focused work, no migrations, no cross-service breaking changes) or complex?
+2. If yes, classify the complexity:
+   - "easy": isolated, single-repo change, < ~1 hour of focused work, no migrations, no cross-service breaking changes
+   - "medium": well-defined but cross-repo or slightly larger (1-3 hours), still automatable with clear steps
+   - "complex_skip": needs design decisions, migrations, unclear scope, or multi-day effort
 3. Which repo(s) need changes?
 4. What type of change is this? "feat" for new features, "fix" for bug fixes, "chore" for refactoring/maintenance.
 
 You MUST output ONLY a JSON block (no other text) in this exact format:
 
 ```json
-{{"decision": "<needs_clarification|complex_skip|easy>", "repos": ["backend", "frontend"], "pr_type": "<feat|fix|chore>", "reasoning": "<1-2 sentence explanation>"}}
+{{"decision": "<needs_clarification|complex_skip|medium|easy>", "repos": ["backend", "frontend"], "pr_type": "<feat|fix|chore>", "reasoning": "<1-2 sentence explanation>"}}
 ```
 
 "repos" should only include repos that need changes. Use "backend" for scout, "frontend" for galaxy.
@@ -299,12 +351,14 @@ You MUST output ONLY a JSON block (no other text) in this exact format:
 def triage_issue(issue: dict, workspace: str) -> dict:
     """Triage a single issue. Returns the parsed decision dict."""
     prompt = TRIAGE_PROMPT.format(**issue)
+    model = os.environ.get("TRIAGE_MODEL") or None
     exit_code, output = run_cursor_agent(prompt, mode="ask", workspace=workspace,
-                                         log_name=f"{issue['id']}-triage")
+                                         log_name=f"{issue['id']}-triage",
+                                         timeout=TRIAGE_TIMEOUT, model=model)
 
     if exit_code != 0:
         tail = output.strip()[-500:] if output.strip() else "(no output)"
-        print(f"  Agent failed (exit={exit_code}). Last output:\n    {tail}", file=sys.stderr)
+        log(f"Agent failed (exit={exit_code}). Last output:\n    {tail}", issue=issue["id"], file=sys.stderr)
 
     parsed = parse_json_from_output(output)
     if parsed and "decision" in parsed:
@@ -327,7 +381,7 @@ def triage_issue(issue: dict, workspace: str) -> dict:
 # ---------------------------------------------------------------------------
 
 PLAN_PROMPT = """\
-You are creating an implementation plan for a Linear issue that has been triaged as easy/automatable.
+You are creating an implementation plan for a Linear issue that has been triaged as automatable.
 
 ## Issue: {id} — {title}
 
@@ -346,6 +400,9 @@ The workspace contains two repos:
 
 ## Instructions
 
+Start your response with a "## Summary" section containing 2-3 sentences describing the change \
+for a PR reviewer. Then provide the detailed implementation plan.
+
 Create a concrete implementation plan. For each affected repo, provide:
 1. Which files need to be created or modified (specific paths)
 2. What the changes are (be specific)
@@ -353,24 +410,96 @@ Create a concrete implementation plan. For each affected repo, provide:
 4. Any risks or edge cases
 
 If both repos are affected, clearly separate the plan into "## Backend (scout)" and "## Frontend (galaxy)" sections.
-Note: if both are affected, the frontend changes may depend on the backend changes being merged and published first.
-The frontend PR may have compilation failures until then — that's expected and should be noted.
+Note: if both are affected, the backend will be implemented first and its APIs linked locally \
+into the frontend worktree, so the frontend agent can compile against the new backend types.
 
 Output your plan as a clear, numbered list per repo. Be specific about file paths.
 """
 
 
-def plan_issue(issue: dict, reasoning: str, repos: list[str], workspace: str) -> str:
-    """Generate an implementation plan. Returns the plan text."""
+def _extract_plan_summary(plan_text: str) -> str | None:
+    """Extract the ## Summary section from a plan."""
+    match = re.search(r"## Summary\s*\n(.*?)(?=\n## |\Z)", plan_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def plan_issue(issue: dict, reasoning: str, repos: list[str], workspace: str) -> tuple[str, str | None]:
+    """Generate an implementation plan. Returns (plan_text, plan_summary)."""
     repos_str = ", ".join(repos)
     prompt = PLAN_PROMPT.format(**issue, reasoning=reasoning, repos_str=repos_str)
+    model = os.environ.get("PLAN_MODEL") or None
     exit_code, output = run_cursor_agent(prompt, mode="plan", workspace=workspace,
-                                         log_name=f"{issue['id']}-plan")
+                                         log_name=f"{issue['id']}-plan",
+                                         timeout=PLAN_TIMEOUT, model=model)
 
     if exit_code != 0:
-        return f"[Plan generation failed with exit code {exit_code}]\n\n{output[-2000:]}"
+        text = f"[Plan generation failed with exit code {exit_code}]\n\n{output[-2000:]}"
+        return text, None
 
-    return output.strip()
+    plan_text = output.strip()
+    plan_summary = _extract_plan_summary(plan_text)
+    return plan_text, plan_summary
+
+
+# ---------------------------------------------------------------------------
+# FE/BE linking
+# ---------------------------------------------------------------------------
+
+def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
+    """Build scout TS APIs in BE worktree and link them into the FE worktree.
+
+    Runs conjure TS codegen + proto zip generation in scout, then uses galaxy's
+    pnpm scout:link to point at the local build.
+    """
+    t0 = time.monotonic()
+
+    log("  Building conjure TypeScript...")
+    result = subprocess.run(
+        ["./gradlew", ":scout-service-api:compileConjureTypeScript"],
+        capture_output=True, text=True, cwd=be_worktree, timeout=300,
+    )
+    if result.returncode != 0:
+        log(f"  compileConjureTypeScript failed: {result.stderr[:500]}")
+        return False
+    log(f"  compileConjureTypeScript done ({_fmt_duration(time.monotonic() - t0)})")
+
+    t1 = time.monotonic()
+    log("  Building proto zip package...")
+    result = subprocess.run(
+        ["./gradlew", ":scout-service-api:generateProtoZipNpmPackage"],
+        capture_output=True, text=True, cwd=be_worktree, timeout=300,
+    )
+    if result.returncode != 0:
+        log(f"  generateProtoZipNpmPackage failed (non-fatal): {result.stderr[:500]}")
+    else:
+        log(f"  generateProtoZipNpmPackage done ({_fmt_duration(time.monotonic() - t1)})")
+
+    t2 = time.monotonic()
+    log("  Linking scout APIs in frontend worktree...")
+    result = subprocess.run(
+        ["pnpm", "scout:link", be_worktree],
+        capture_output=True, text=True, cwd=fe_worktree, timeout=120,
+    )
+    if result.returncode != 0:
+        log(f"  scout:link failed: {result.stderr[:500]}")
+        return False
+    log(f"  scout:link done ({_fmt_duration(time.monotonic() - t2)})")
+
+    t3 = time.monotonic()
+    log("  Running proto codegen...")
+    result = subprocess.run(
+        ["pnpm", "generate:proto"],
+        capture_output=True, text=True, cwd=fe_worktree, timeout=120,
+    )
+    if result.returncode != 0:
+        log(f"  generate:proto failed (non-fatal): {result.stderr[:500]}")
+    else:
+        log(f"  generate:proto done ({_fmt_duration(time.monotonic() - t3)})")
+
+    log(f"  FE/BE linking complete ({_fmt_duration(time.monotonic() - t0)})")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +552,14 @@ NOTE: This issue also has backend changes in a separate PR. The backend API chan
 may not be published yet. Compilation failures from missing backend dependencies and API changes are
 expected and acceptable — the frontend PR will be mergeable after the backend merges."""
 
+BE_LINKED_NOTE = """\
+NOTE: This issue also has backend changes. The backend APIs have been built and linked locally
+into this worktree via scout:link, so you can compile against the new backend types.
+Compilation should work — if you see missing types, check that the import paths are correct."""
 
-def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str) -> dict:
+
+def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
+                             be_worktree_path: str | None = None) -> dict:
     """Create a worktree in the given repo and run the implementation agent. Returns impl record."""
     repo_path = get_repo_path(repo_key)
     branch_name = f"agent/{issue_id}"
@@ -439,7 +574,7 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str) -> di
     wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
     if wt_result.returncode != 0:
         if "already exists" in wt_result.stderr:
-            print(f"  Worktree/branch {branch_name} already exists, reusing")
+            log(f"Worktree/branch {branch_name} already exists, reusing", issue=issue_id)
         else:
             return {
                 "repo": repo_key,
@@ -449,8 +584,20 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str) -> di
                 "completed_at": now_iso(),
             }
 
+    be_linked = False
     repos_affected = tracking.get("repos", [])
-    be_note = BE_DEPENDENCY_NOTE if repo_key == "frontend" and "backend" in repos_affected else ""
+    if repo_key == "frontend" and be_worktree_path and "backend" in repos_affected:
+        log("Linking local scout APIs from backend worktree...", issue=issue_id)
+        be_linked = link_be_to_fe(be_worktree_path, worktree_path)
+        if not be_linked:
+            log("WARNING: Failed to link scout APIs, FE may have compilation issues", issue=issue_id)
+
+    if be_linked:
+        be_note = BE_LINKED_NOTE
+    elif repo_key == "frontend" and "backend" in repos_affected:
+        be_note = BE_DEPENDENCY_NOTE
+    else:
+        be_note = ""
 
     if repo_key == "backend":
         prompt = IMPLEMENT_PROMPT_BACKEND.format(
@@ -466,9 +613,11 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str) -> di
             be_note=be_note,
         )
 
+    model = os.environ.get("IMPL_MODEL") or None
     started_at = now_iso()
     exit_code, output = run_cursor_agent(prompt, workspace=worktree_path, yolo=True, sandbox=True,
-                                         log_name=worktree_name)
+                                         log_name=worktree_name, timeout=IMPL_TIMEOUT,
+                                         model=model)
     completed_at = now_iso()
 
     log_file = LOGS_DIR / f"{worktree_name}.log"
@@ -495,70 +644,236 @@ def _get_default_branch(repo: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PR review / revision
+# ---------------------------------------------------------------------------
+
+REVISE_PROMPT = """\
+You are addressing PR review feedback on a git worktree.
+
+## Issue: {id} — {title}
+
+## Unresolved review comments
+
+{comments_formatted}
+
+## Instructions
+
+- Address each review comment listed above.
+- If a comment requests a code change, make the change.
+- If a comment is a question, answer it with a code change or clarifying code comment.
+- Run compilation and tests after making changes.
+- Commit your changes with message "fix: address review feedback for {id}"
+- Do NOT push to remote. Do NOT create a PR.
+"""
+
+
+def _parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
+    """Extract (owner, repo, number) from a GitHub PR URL."""
+    match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
+    if match:
+        return match.group(1), match.group(2), match.group(3)
+    return None
+
+
+def fetch_pr_comments(pr_url: str) -> list[dict]:
+    """Fetch unresolved review comments from a GitHub PR using GraphQL."""
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        log(f"Could not parse PR URL: {pr_url}")
+        return []
+
+    owner, repo, number = parsed
+
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes {
+              isResolved
+              comments(first: 10) {
+                nodes {
+                  body
+                  path
+                  line
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    result = subprocess.run(
+        ["gh", "api", "graphql",
+         "-f", f"query={query}",
+         "-F", f"owner={owner}",
+         "-F", f"repo={repo}",
+         "-F", f"number={number}"],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode != 0:
+        log(f"Failed to fetch PR comments: {result.stderr[:500]}")
+        return []
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        log("Failed to parse PR comments response")
+        return []
+
+    pr_data = data.get("data", {}).get("repository", {}).get("pullRequest")
+    if not pr_data:
+        log("PR not found in GraphQL response")
+        return []
+
+    threads = pr_data.get("reviewThreads", {}).get("nodes", [])
+
+    comments = []
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        thread_comments = thread.get("comments", {}).get("nodes", [])
+        if not thread_comments:
+            continue
+
+        first = thread_comments[0]
+        body_parts = [first.get("body", "")]
+        for reply in thread_comments[1:]:
+            author = reply.get("author", {}).get("login", "unknown")
+            body_parts.append(f"\n> Reply from {author}: {reply.get('body', '')}")
+
+        comments.append({
+            "path": first.get("path"),
+            "line": first.get("line"),
+            "author": first.get("author", {}).get("login", "unknown"),
+            "body": "\n".join(body_parts),
+        })
+
+    return comments
+
+
+def _format_comments_for_prompt(comments: list[dict]) -> str:
+    """Format PR comments into a readable string for the revision prompt."""
+    if not comments:
+        return "(no comments)"
+
+    parts = []
+    for i, c in enumerate(comments, 1):
+        location = ""
+        if c.get("path"):
+            location = f" in `{c['path']}`"
+            if c.get("line"):
+                location += f" (line {c['line']})"
+        author = c.get("author", "unknown")
+        parts.append(f"{i}. **{author}**{location}:\n   {c['body']}")
+
+    return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # CLI commands
 # ---------------------------------------------------------------------------
+
+def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
+    """Triage a single issue and generate a plan if easy/medium. Returns tracking data."""
+    iid = issue["id"]
+    log(f"Triaging: {issue['title']}", issue=iid)
+
+    decision = triage_issue(issue, workspace)
+    repos = decision.get("repos", [])
+    repos_str = ", ".join(repos) if repos else "none"
+    log(f"Decision: {decision['decision']} | repos: {repos_str} — {decision['reasoning']}", issue=iid)
+
+    tracking_data = {
+        "issue_id": issue["id"],
+        "title": issue["title"],
+        "description": issue.get("description", ""),
+        "url": issue["url"],
+        "team": issue.get("team"),
+        "labels": issue.get("labels", []),
+        "triaged_at": now_iso(),
+        "decision": decision["decision"],
+        "repos": repos,
+        "pr_type": decision.get("pr_type", "feat"),
+        "reasoning": decision["reasoning"],
+        "status": decision["decision"],
+        "plan": None,
+        "plan_summary": None,
+        "implementations": {},
+    }
+
+    if decision["decision"] in ("easy", "medium"):
+        log("Generating implementation plan...", issue=iid)
+        plan, plan_summary = plan_issue(issue, decision["reasoning"], repos, workspace)
+        tracking_data["plan"] = plan
+        tracking_data["plan_summary"] = plan_summary
+        tracking_data["status"] = "awaiting_approval"
+        log("Plan saved — awaiting approval", issue=iid)
+
+    return tracking_data
+
 
 def cmd_triage(args: argparse.Namespace) -> None:
     workspace = str(ensure_workspace_symlinks())
 
-    print("Fetching issues from Linear...")
+    log("Fetching issues from Linear...")
     issues = fetch_issues()
-    print(f"  Found {len(issues)} open issues")
+    log(f"Found {len(issues)} open issues")
 
     tracked = load_all_tracking()
     untracked = [i for i in issues if i["id"] not in tracked]
-    print(f"  {len(untracked)} untracked issues")
+    log(f"{len(untracked)} untracked issues")
 
     if args.limit:
         untracked = untracked[:args.limit]
-        print(f"  Limited to {args.limit} issues")
+        log(f"Limited to {args.limit} issues")
 
-    for issue in untracked:
-        print(f"\n--- Triaging {issue['id']}: {issue['title']}")
+    if not untracked:
+        log("No new issues to triage.")
+        return
 
-        decision = triage_issue(issue, workspace)
-        repos = decision.get("repos", [])
-        repos_str = ", ".join(repos) if repos else "none"
-        print(f"  Decision: {decision['decision']} | repos: {repos_str} — {decision['reasoning']}")
+    total = len(untracked)
+    workers = getattr(args, "workers", DEFAULT_WORKERS)
+    log(f"Triaging {total} issue(s) with {workers} worker(s)...")
+    t0 = time.monotonic()
+    done = 0
+    counts: dict[str, int] = {}
 
-        tracking_data = {
-            "issue_id": issue["id"],
-            "title": issue["title"],
-            "description": issue.get("description", ""),
-            "url": issue["url"],
-            "team": issue.get("team"),
-            "labels": issue.get("labels", []),
-            "triaged_at": now_iso(),
-            "decision": decision["decision"],
-            "repos": repos,
-            "pr_type": decision.get("pr_type", "feat"),
-            "reasoning": decision["reasoning"],
-            "status": decision["decision"],
-            "plan": None,
-            "implementations": {},
-        }
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_triage_and_plan_issue, issue, workspace): issue
+                   for issue in untracked}
+        for future in as_completed(futures):
+            issue = futures[future]
+            try:
+                tracking_data = future.result()
+                save_tracking(issue["id"], tracking_data)
+                decision = tracking_data.get("decision", "unknown")
+                counts[decision] = counts.get(decision, 0) + 1
+            except Exception as exc:
+                log(f"Triage failed with exception: {exc}", issue=issue["id"], file=sys.stderr)
+                counts["error"] = counts.get("error", 0) + 1
+            done += 1
+            log(f"Progress: {done}/{total} triaged")
 
-        if decision["decision"] == "easy":
-            print("  Generating implementation plan...")
-            plan = plan_issue(issue, decision["reasoning"], repos, workspace)
-            tracking_data["plan"] = plan
-            tracking_data["status"] = "awaiting_approval"
-            print("  Plan saved — awaiting approval")
-
-        save_tracking(issue["id"], tracking_data)
-
-    print("\nTriage complete. Run 'status' to review.")
+    elapsed = time.monotonic() - t0
+    summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1]))
+    log(f"Triage complete in {_fmt_duration(elapsed)}: {summary}")
+    log("Run 'status' to review.")
 
 
 def cmd_status(_args: argparse.Namespace) -> None:
     tracked = load_all_tracking()
     if not tracked:
-        print("No tracked issues yet. Run 'triage' first.")
+        log("No tracked issues yet. Run 'triage' first.")
         return
 
     status_order = {
-        "awaiting_approval": 0, "approved": 1, "implemented": 2,
-        "failed": 3, "easy": 4, "needs_clarification": 5, "complex_skip": 6,
+        "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
+        "failed": 4, "easy": 5, "medium": 6, "needs_clarification": 7, "complex_skip": 8,
     }
     sorted_items = sorted(tracked.values(), key=lambda t: status_order.get(t["status"], 99))
 
@@ -571,8 +886,8 @@ def cmd_status(_args: argparse.Namespace) -> None:
     for t in sorted_items:
         repos = ",".join(t.get("repos", []))[:12] or "-"
         summary = ""
-        if t["status"] == "awaiting_approval" and t.get("plan"):
-            summary = t["plan"][:70].replace("\n", " ")
+        if t["status"] == "awaiting_approval":
+            summary = (t.get("plan_summary") or t.get("plan", "") or "")[:70].replace("\n", " ")
         elif t.get("reasoning"):
             summary = t["reasoning"][:70]
         impls = t.get("implementations", {})
@@ -587,61 +902,97 @@ def cmd_approve(args: argparse.Namespace) -> None:
     for issue_id in args.issue_ids:
         tracking = load_tracking(issue_id)
         if not tracking:
-            print(f"  {issue_id}: not found in tracking")
+            log("Not found in tracking", issue=issue_id)
             continue
         if tracking["status"] != "awaiting_approval":
-            print(f"  {issue_id}: status is '{tracking['status']}', expected 'awaiting_approval'")
+            log(f"Status is '{tracking['status']}', expected 'awaiting_approval'", issue=issue_id)
             continue
         tracking["status"] = "approved"
         tracking["approved_at"] = now_iso()
         save_tracking(issue_id, tracking)
-        print(f"  {issue_id}: approved")
+        log("Approved", issue=issue_id)
 
 
-def cmd_implement(_args: argparse.Namespace) -> None:
+def _implement_issue(tracking: dict) -> dict:
+    """Implement all repos for a single issue. Returns updated tracking dict."""
+    issue_id = tracking["issue_id"]
+    repos = tracking.get("repos", ["backend"])
+    log(f"Implementing: {tracking['title']} (repos: {', '.join(repos)})", issue=issue_id)
+
+    t0 = time.monotonic()
+    implementations = tracking.get("implementations", {})
+    all_ok = True
+    be_worktree_path = None
+
+    for repo_key in repos:
+        if repo_key in implementations and implementations[repo_key].get("exit_code") == 0:
+            log(f"{repo_key}: already implemented, skipping", issue=issue_id)
+            if repo_key == "backend":
+                be_worktree_path = implementations[repo_key].get("worktree_path")
+            continue
+
+        log(f"{repo_key}: creating worktree and running agent...", issue=issue_id)
+        impl = implement_issue_for_repo(issue_id, tracking, repo_key,
+                                        be_worktree_path=be_worktree_path)
+        implementations[repo_key] = impl
+
+        if impl.get("exit_code", -1) != 0:
+            all_ok = False
+            log(f"{repo_key}: FAILED (exit={impl.get('exit_code')})", issue=issue_id)
+        else:
+            log(f"{repo_key}: done", issue=issue_id)
+            if repo_key == "backend":
+                be_worktree_path = impl.get("worktree_path")
+
+        if impl.get("output_log"):
+            log(f"  Log: {impl['output_log']}", issue=issue_id)
+
+    elapsed = time.monotonic() - t0
+    status = "implemented" if all_ok else "failed"
+    tracking["implementations"] = implementations
+    tracking["status"] = status
+    log(f"Implementation {status} in {_fmt_duration(elapsed)}", issue=issue_id)
+    return tracking
+
+
+def cmd_implement(args: argparse.Namespace) -> None:
     tracked = load_all_tracking()
     approved = [t for t in tracked.values() if t["status"] == "approved"]
 
     if not approved:
-        print("No approved issues to implement. Run 'approve <issue-id>' first.")
+        log("No approved issues to implement. Run 'approve <issue-id>' first.")
         return
 
-    for tracking in approved:
-        issue_id = tracking["issue_id"]
-        repos = tracking.get("repos", ["backend"])
-        print(f"\n--- Implementing {issue_id}: {tracking['title']} (repos: {', '.join(repos)})")
+    total = len(approved)
+    workers = getattr(args, "workers", DEFAULT_WORKERS)
+    log(f"Implementing {total} issue(s) with {workers} worker(s)...")
+    t0 = time.monotonic()
+    done = 0
+    succeeded = 0
 
-        implementations = tracking.get("implementations", {})
-        all_ok = True
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_implement_issue, t): t for t in approved}
+        for future in as_completed(futures):
+            orig = futures[future]
+            try:
+                tracking = future.result()
+                save_tracking(tracking["issue_id"], tracking)
+                if tracking["status"] == "implemented":
+                    succeeded += 1
+            except Exception as exc:
+                log(f"Implementation failed with exception: {exc}",
+                    issue=orig["issue_id"], file=sys.stderr)
+            done += 1
+            log(f"Progress: {done}/{total} done ({succeeded} succeeded)")
 
-        for repo_key in repos:
-            if repo_key in implementations and implementations[repo_key].get("exit_code") == 0:
-                print(f"  {repo_key}: already implemented, skipping")
-                continue
-
-            print(f"  {repo_key}: creating worktree and running agent...")
-            impl = implement_issue_for_repo(issue_id, tracking, repo_key)
-            implementations[repo_key] = impl
-
-            if impl.get("exit_code", -1) != 0:
-                all_ok = False
-                print(f"  {repo_key}: FAILED (exit={impl.get('exit_code')})")
-                if impl.get("output_log"):
-                    print(f"    Log: {impl['output_log']}")
-            else:
-                print(f"  {repo_key}: done")
-                if impl.get("output_log"):
-                    print(f"    Log: {impl['output_log']}")
-
-        tracking["implementations"] = implementations
-        tracking["status"] = "implemented" if all_ok else "failed"
-        save_tracking(issue_id, tracking)
+    elapsed = time.monotonic() - t0
+    log(f"Implementation complete in {_fmt_duration(elapsed)}: {succeeded}/{total} succeeded")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     cmd_triage(args)
-    print("\n" + "=" * 60)
-    print("Triage complete. Now implementing approved issues...\n")
+    log("=" * 60)
+    log("Triage complete. Now implementing approved issues...")
     cmd_implement(args)
 
 
@@ -651,18 +1002,20 @@ def cmd_push(args: argparse.Namespace) -> None:
         tracked = load_all_tracking()
         issue_ids = [t["issue_id"] for t in tracked.values() if t["status"] == "implemented"]
         if not issue_ids:
-            print("No implemented issues to push.")
+            log("No implemented issues to push.")
             return
     else:
         issue_ids = args.issue_ids
 
+    log(f"Pushing {len(issue_ids)} issue(s)...")
+
     for issue_id in issue_ids:
         tracking = load_tracking(issue_id)
         if not tracking:
-            print(f"  {issue_id}: not found in tracking")
+            log(f"Not found in tracking", issue=issue_id)
             continue
         if tracking["status"] not in ("implemented", "pushed"):
-            print(f"  {issue_id}: status is '{tracking['status']}', expected 'implemented'")
+            log(f"Status is '{tracking['status']}', expected 'implemented'", issue=issue_id)
             continue
 
         repos = tracking.get("repos", ["backend"])
@@ -672,28 +1025,28 @@ def cmd_push(args: argparse.Namespace) -> None:
         for repo_key in repos:
             impl = implementations.get(repo_key, {})
             if not impl or impl.get("exit_code") != 0:
-                print(f"  {issue_id}/{repo_key}: not successfully implemented, skipping")
+                log(f"{repo_key}: not successfully implemented, skipping", issue=issue_id)
                 continue
             if repo_key in prs:
-                print(f"  {issue_id}/{repo_key}: PR already created: {prs[repo_key]['url']}")
+                log(f"{repo_key}: PR already created: {prs[repo_key]['url']}", issue=issue_id)
                 continue
 
             worktree_path = impl["worktree_path"]
             branch = impl["worktree_branch"]
 
-            print(f"  {issue_id}/{repo_key}: pushing {branch}...")
+            log(f"{repo_key}: pushing {branch}...", issue=issue_id)
             push_result = subprocess.run(
                 ["git", "-C", worktree_path, "push", "-u", "origin", branch],
                 capture_output=True, text=True,
             )
             if push_result.returncode != 0:
-                print(f"    Push failed: {push_result.stderr.strip()}")
+                log(f"{repo_key}: push failed: {push_result.stderr.strip()}", issue=issue_id)
                 continue
 
             pr_title = _make_pr_title(tracking)
             pr_body = _make_pr_body(tracking, repo_key)
 
-            print(f"  {issue_id}/{repo_key}: creating PR...")
+            log(f"{repo_key}: creating PR...", issue=issue_id)
             pr_result = subprocess.run(
                 ["gh", "pr", "create",
                  "--title", pr_title,
@@ -702,11 +1055,11 @@ def cmd_push(args: argparse.Namespace) -> None:
                 capture_output=True, text=True, cwd=worktree_path,
             )
             if pr_result.returncode != 0:
-                print(f"    PR creation failed: {pr_result.stderr.strip()}")
+                log(f"{repo_key}: PR creation failed: {pr_result.stderr.strip()}", issue=issue_id)
                 continue
 
             pr_url = pr_result.stdout.strip()
-            print(f"    PR created: {pr_url}")
+            log(f"{repo_key}: PR created: {pr_url}", issue=issue_id)
             prs[repo_key] = {"url": pr_url, "created_at": now_iso()}
 
         tracking["pull_requests"] = prs
@@ -730,7 +1083,6 @@ def _make_pr_title(tracking: dict) -> str:
 def _make_pr_body(tracking: dict, repo_key: str) -> str:
     """Generate PR body from tracking data."""
     issue_url = tracking.get("url", "")
-    plan = tracking.get("plan", "")
     repos = tracking.get("repos", [])
 
     lines = []
@@ -740,10 +1092,9 @@ def _make_pr_body(tracking: dict, repo_key: str) -> str:
     lines.append(f"Auto-generated by linear-auto-agent from {tracking['issue_id']}.")
     lines.append("")
 
-    if plan:
-        lines.append("### Implementation plan")
-        lines.append("")
-        lines.append(plan)
+    summary = tracking.get("plan_summary", "")
+    if summary:
+        lines.append(summary)
         lines.append("")
 
     if len(repos) > 1 and repo_key == "frontend":
@@ -753,12 +1104,120 @@ def _make_pr_body(tracking: dict, repo_key: str) -> str:
                       "This PR may have compilation failures until the backend PR is merged and published.")
         lines.append("")
 
-    lines.append("### Testing plan")
+    lines.append("### Testing")
     lines.append("")
     lines.append("- [ ] Review agent-generated changes")
     lines.append("- [ ] Verify compilation and tests pass")
 
     return "\n".join(lines)
+
+
+def _revise_issue(tracking: dict) -> dict:
+    """Check for unresolved PR comments and run agents to address them."""
+    issue_id = tracking["issue_id"]
+    prs = tracking.get("pull_requests", {})
+    if not prs:
+        return tracking
+
+    revisions = tracking.get("revisions", [])
+
+    for repo_key, pr_info in prs.items():
+        pr_url = pr_info.get("url", "")
+        if not pr_url:
+            continue
+
+        log(f"{repo_key}: checking PR {pr_url}", issue=issue_id)
+        comments = fetch_pr_comments(pr_url)
+
+        if not comments:
+            log(f"{repo_key}: no unresolved comments, skipping", issue=issue_id)
+            continue
+
+        log(f"{repo_key}: found {len(comments)} unresolved comment(s)", issue=issue_id)
+
+        impl = tracking.get("implementations", {}).get(repo_key, {})
+        worktree_path = impl.get("worktree_path")
+        if not worktree_path or not Path(worktree_path).is_dir():
+            log(f"{repo_key}: worktree not found at {worktree_path}, skipping", issue=issue_id)
+            continue
+
+        comments_formatted = _format_comments_for_prompt(comments)
+        prompt = REVISE_PROMPT.format(
+            id=issue_id, title=tracking["title"],
+            comments_formatted=comments_formatted,
+        )
+
+        model = os.environ.get("IMPL_MODEL") or None
+        log_name = f"{issue_id}-{repo_key}-revise"
+        exit_code, _output = run_cursor_agent(
+            prompt, workspace=worktree_path, yolo=True, sandbox=True,
+            log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
+        )
+
+        log_file = LOGS_DIR / f"{log_name}.log"
+
+        if exit_code != 0:
+            log(f"{repo_key}: revision agent FAILED (exit={exit_code})", issue=issue_id)
+            if log_file.exists():
+                log(f"  Log: {log_file}", issue=issue_id)
+            continue
+
+        log(f"{repo_key}: pushing revision...", issue=issue_id)
+        push_result = subprocess.run(
+            ["git", "-C", worktree_path, "push"],
+            capture_output=True, text=True,
+        )
+        if push_result.returncode != 0:
+            log(f"{repo_key}: push failed: {push_result.stderr.strip()}", issue=issue_id)
+            continue
+
+        log(f"{repo_key}: revision pushed successfully", issue=issue_id)
+        revisions.append({
+            "repo": repo_key,
+            "comments_addressed": len(comments),
+            "revised_at": now_iso(),
+            "exit_code": exit_code,
+            "log": str(log_file),
+        })
+
+    tracking["revisions"] = revisions
+    return tracking
+
+
+def cmd_revise(args: argparse.Namespace) -> None:
+    """Address PR review feedback for pushed issues."""
+    tracked = load_all_tracking()
+
+    if args.issue_ids:
+        candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
+    else:
+        candidates = [t for t in tracked.values() if t["status"] == "pushed"]
+
+    if not candidates:
+        log("No pushed issues with PRs to revise.")
+        return
+
+    total = len(candidates)
+    workers = getattr(args, "workers", DEFAULT_WORKERS)
+    log(f"Revising {total} issue(s) with {workers} worker(s)...")
+    t0 = time.monotonic()
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_revise_issue, t): t for t in candidates}
+        for future in as_completed(futures):
+            orig = futures[future]
+            try:
+                tracking = future.result()
+                save_tracking(tracking["issue_id"], tracking)
+            except Exception as exc:
+                log(f"Revision failed with exception: {exc}",
+                    issue=orig["issue_id"], file=sys.stderr)
+            done += 1
+            log(f"Progress: {done}/{total} revised")
+
+    elapsed = time.monotonic() - t0
+    log(f"Revision complete in {_fmt_duration(elapsed)}")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
@@ -774,6 +1233,11 @@ def cmd_show(args: argparse.Namespace) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _add_workers_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"Max parallel agents (default: {DEFAULT_WORKERS})")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Linear Auto-Agent: triage, plan, and implement Linear issues via cursor agent",
@@ -782,6 +1246,7 @@ def main():
 
     p_triage = sub.add_parser("triage", help="Fetch and triage open Linear issues")
     p_triage.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    _add_workers_arg(p_triage)
     p_triage.set_defaults(func=cmd_triage)
 
     p_status = sub.add_parser("status", help="Show status of all tracked issues")
@@ -792,16 +1257,23 @@ def main():
     p_approve.set_defaults(func=cmd_approve)
 
     p_implement = sub.add_parser("implement", help="Implement all approved issues")
+    _add_workers_arg(p_implement)
     p_implement.set_defaults(func=cmd_implement)
 
     p_run = sub.add_parser("run", help="Full cycle: triage then implement approved")
     p_run.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    _add_workers_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
     p_push = sub.add_parser("push", help="Push worktrees and create PRs for implemented issues")
     p_push.add_argument("issue_ids", nargs="*", help="Issue identifiers to push")
     p_push.add_argument("--all", action="store_true", help="Push all implemented issues")
     p_push.set_defaults(func=cmd_push)
+
+    p_revise = sub.add_parser("revise", help="Address PR review feedback for pushed issues")
+    p_revise.add_argument("issue_ids", nargs="*", help="Issue identifiers to revise (default: all pushed)")
+    _add_workers_arg(p_revise)
+    p_revise.set_defaults(func=cmd_revise)
 
     p_show = sub.add_parser("show", help="Show full details for an issue")
     p_show.add_argument("issue_id", help="Issue identifier")

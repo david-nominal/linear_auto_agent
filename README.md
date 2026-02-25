@@ -11,12 +11,18 @@ Automated triage and implementation of Linear issues using Cursor Agent CLI.
    - `BACKEND_REPO` — absolute path to the backend repo (e.g. `/Users/you/git/scout`)
    - `FRONTEND_REPO` — absolute path to the frontend repo (e.g. `/Users/you/git/galaxy`)
 
+Optional model overrides (uses cursor agent's default model if unset):
+   - `TRIAGE_MODEL` — model for triage (e.g. `gpt-4o-mini` for speed/cost)
+   - `PLAN_MODEL` — model for planning
+   - `IMPL_MODEL` — model for implementation and revision
+
 ## Usage
 
 ```bash
 # Triage open issues (fetches from Linear, runs read-only agent for each)
 ./run.sh triage
-./run.sh triage --limit 5    # only process 5 issues
+./run.sh triage --limit 5              # only process 5 issues
+./run.sh triage --limit 10 --workers 5 # triage 10 issues, 5 in parallel
 
 # Review what the agent found
 ./run.sh status
@@ -29,9 +35,18 @@ Automated triage and implementation of Linear issues using Cursor Agent CLI.
 
 # Implement all approved issues (creates git worktrees, runs coding agent)
 ./run.sh implement
+./run.sh implement --workers 2         # implement 2 issues in parallel
 
 # Full cycle: triage then implement previously-approved issues
 ./run.sh run --limit 3
+
+# Push implemented issues and create PRs
+./run.sh push --all
+./run.sh push ENG-123
+
+# Address PR review feedback (fetches unresolved comments, runs agent, pushes)
+./run.sh revise                        # all pushed PRs with unresolved comments
+./run.sh revise ENG-123                # specific issue only
 ```
 
 ## How it works
@@ -46,26 +61,28 @@ For read-only steps (triage + planning), a symlinked workspace at `data/workspac
 visibility into both repos in a single call. For implementation, separate git worktrees are created
 per affected repo for isolation.
 
-If an issue requires changes to both repos, the agent creates two worktrees and two separate PRs.
-The frontend PR may have compilation failures until the backend PR is merged and published — this
-is expected and noted in the tracking file.
+If an issue requires changes to both repos, the backend is implemented first. Then the scout
+Conjure TypeScript and proto zip are built locally and linked into the galaxy worktree via
+`pnpm scout:link`, so the frontend agent can compile against the new backend types.
 
 ### Security model
 
-| Step       | Agent mode                    | Permissions                        |
-|------------|-------------------------------|------------------------------------|
-| Fetch      | Python (no agent)             | Linear API read-only               |
-| Triage     | `cursor agent --mode ask`     | Read-only, no MCP, no edits        |
-| Plan       | `cursor agent --mode plan`    | Read-only, no MCP, no edits        |
-| Implement  | `cursor agent --yolo`         | Edit + shell, scoped to worktree, no MCP |
+| Step       | Agent mode                    | Timeout | Permissions                        |
+|------------|-------------------------------|---------|-------------------------------------|
+| Fetch      | Python (no agent)             | —       | Linear API read-only               |
+| Triage     | `cursor agent --mode ask`     | 60s     | Read-only, no MCP, no edits        |
+| Plan       | `cursor agent --mode plan`    | 120s    | Read-only, no MCP, no edits        |
+| Implement  | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
+| Revise     | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
 
 ### Workflow
 
-1. **Triage** — fetches open Linear issues, asks a read-only agent (with visibility into both repos) whether each is well-defined and easy or complex, and which repos are affected
-2. **Plan** — for easy issues, a read-only agent produces a concrete implementation plan with separate sections per repo
+1. **Triage** — fetches open Linear issues, classifies each as easy/medium/complex and which repos are affected (parallelized)
+2. **Plan** — for easy and medium issues, produces a concrete implementation plan with a short summary for PR descriptions
 3. **Review** — you review plans via `status`/`show` and `approve` the ones you want implemented
-4. **Implement** — a coding agent implements approved issues on isolated git worktrees (no push)
-5. **Review** — you inspect worktrees and push/PR manually
+4. **Implement** — implements approved issues on isolated git worktrees; for cross-repo issues, builds and links backend APIs locally before running the frontend agent (parallelized across issues)
+5. **Push** — pushes branches and creates PRs with concise descriptions
+6. **Revise** — fetches unresolved PR review comments (from humans, Devin, Greptile, etc.), runs an agent to address them, and pushes the fixes
 
 ### Data layout
 
