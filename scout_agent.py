@@ -231,6 +231,7 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
     cmd = ["cursor", "agent", "--print", "--trust"]
 
     api_key = os.environ.get("CURSOR_API_KEY", "")
+    log(f"API key set: {len(api_key)} chars")
     if api_key:
         cmd += ["--api-key", api_key]
 
