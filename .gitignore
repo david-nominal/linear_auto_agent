@@ -1,0 +1,7 @@
+data/
+worktrees/
+logs/
+.env
+__pycache__/
+*.pyc
+.venv/
