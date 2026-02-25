@@ -681,6 +681,20 @@ You are addressing PR review feedback on a git worktree.
 
 ## Issue: {id} — {title}
 
+{description}
+
+## Triage
+
+{triage}
+
+## Implementation plan
+
+{plan}
+
+## Prior implementation log (tail)
+
+{prior_log}
+
 ## Unresolved review comments
 
 {comments_formatted}
@@ -688,6 +702,8 @@ You are addressing PR review feedback on a git worktree.
 ## Instructions
 
 - Address each review comment listed above.
+- Keep the original issue description, triage assessment, and implementation plan in mind — \
+ensure your changes stay consistent with the overall intent.
 - If a comment requests a code change, make the change.
 - If a comment is a question, answer it with a code change or clarifying code comment.
 - Run compilation and tests after making changes.
@@ -1288,8 +1304,21 @@ def _revise_issue(tracking: dict) -> dict:
                 "conflicts, then run compilation/tests."
             )
 
+        prior_log = ""
+        impl_log_path = impl.get("output_log", "")
+        if impl_log_path and Path(impl_log_path).exists():
+            content = Path(impl_log_path).read_text()
+            prior_log = content[-4000:] if len(content) > 4000 else content
+
+        triage = tracking.get("triage", {})
+        triage_text = triage.get("summary", "") if isinstance(triage, dict) else str(triage)
+
         prompt = REVISE_PROMPT.format(
             id=issue_id, title=tracking["title"],
+            description=tracking.get("description", ""),
+            triage=triage_text or "No triage available",
+            plan=tracking.get("plan", "No plan available"),
+            prior_log=prior_log or "No prior log available",
             comments_formatted=comments_formatted,
         )
 
