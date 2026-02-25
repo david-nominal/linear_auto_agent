@@ -570,7 +570,13 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     default_branch = _get_default_branch(repo_path)
-    wt_cmd = ["git", "-C", repo_path, "worktree", "add", worktree_path, "-b", branch_name, default_branch]
+    remote_ref = f"origin/{default_branch}"
+
+    log(f"Fetching latest {remote_ref}...", issue=issue_id)
+    subprocess.run(["git", "-C", repo_path, "fetch", "origin", default_branch],
+                   capture_output=True, text=True)
+
+    wt_cmd = ["git", "-C", repo_path, "worktree", "add", worktree_path, "-b", branch_name, remote_ref]
     wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
     if wt_result.returncode != 0:
         if "already exists" in wt_result.stderr:
@@ -1113,6 +1119,42 @@ def _make_pr_body(tracking: dict, repo_key: str, *, link_issue: bool = False) ->
     return "\n".join(lines)
 
 
+def _merge_upstream(worktree_path: str, issue_id: str, repo_key: str) -> bool:
+    """Fetch and merge upstream main into the worktree branch.
+
+    Returns True if there are unresolved merge conflicts (agent should fix them),
+    False if the merge was clean or a fast-forward.
+    """
+    log(f"{repo_key}: fetching upstream...", issue=issue_id)
+    subprocess.run(["git", "-C", worktree_path, "fetch", "origin"],
+                   capture_output=True, text=True)
+
+    default_branch = _get_default_branch(worktree_path)
+    remote_ref = f"origin/{default_branch}"
+
+    log(f"{repo_key}: merging {remote_ref}...", issue=issue_id)
+    merge_result = subprocess.run(
+        ["git", "-C", worktree_path, "merge", remote_ref, "--no-edit"],
+        capture_output=True, text=True,
+    )
+
+    if merge_result.returncode == 0:
+        log(f"{repo_key}: merge clean", issue=issue_id)
+        return False
+
+    if "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr:
+        conflict_files = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--name-only", "--diff-filter=U"],
+            capture_output=True, text=True,
+        )
+        files = conflict_files.stdout.strip()
+        log(f"{repo_key}: merge conflicts in: {files}", issue=issue_id)
+        return True
+
+    log(f"{repo_key}: merge failed unexpectedly: {merge_result.stderr.strip()}", issue=issue_id)
+    return False
+
+
 def _revise_issue(tracking: dict) -> dict:
     """Check for unresolved PR comments and run agents to address them."""
     issue_id = tracking["issue_id"]
@@ -1142,7 +1184,16 @@ def _revise_issue(tracking: dict) -> dict:
             log(f"{repo_key}: worktree not found at {worktree_path}, skipping", issue=issue_id)
             continue
 
+        merge_conflict = _merge_upstream(worktree_path, issue_id, repo_key)
+
         comments_formatted = _format_comments_for_prompt(comments)
+        if merge_conflict:
+            comments_formatted += (
+                "\n\nADDITIONAL TASK: There are merge conflicts with the main branch that "
+                "have been left as conflict markers in the working tree. Resolve all merge "
+                "conflicts, then run compilation/tests."
+            )
+
         prompt = REVISE_PROMPT.format(
             id=issue_id, title=tracking["title"],
             comments_formatted=comments_formatted,
