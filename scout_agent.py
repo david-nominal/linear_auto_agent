@@ -761,10 +761,14 @@ def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
 
     t3 = time.monotonic()
     log("  Linking scout APIs in frontend worktree...")
-    result = subprocess.run(
-        ["pnpm", "scout:link", be_worktree],
-        capture_output=True, text=True, cwd=fe_worktree, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["pnpm", "scout:link", be_worktree],
+            capture_output=True, text=True, cwd=fe_worktree, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        log("  scout:link timed out")
+        return False
     if result.returncode != 0:
         log(f"  scout:link failed: {result.stderr[:500]}")
         return False
@@ -1437,6 +1441,9 @@ def _self_review_repo(tracking: dict, repo_key: str) -> str | None:
         return None
 
     feedback = output.strip()
+    if not feedback:
+        log(f"{repo_key}: review output empty (no LGTM, no feedback)", issue=issue_id)
+        return None
     log(f"{repo_key}: review found issues", issue=issue_id)
     return feedback
 
