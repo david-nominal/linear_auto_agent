@@ -394,6 +394,40 @@ def fetch_issue_comments(issue_id: str) -> dict:
     return {"comments": comments, "attachments": attachments}
 
 
+def fetch_issue_state_types(issue_ids: list[str]) -> dict[str, str | None]:
+    """Batch-fetch the Linear state type for each issue. Returns {issue_id: state_type}."""
+    results: dict[str, str | None] = {}
+    headers = {"Authorization": linear_api_key(), "Content-Type": "application/json"}
+
+    for issue_id in issue_ids:
+        match = re.match(r"^([A-Za-z]+)-(\d+)$", issue_id)
+        if not match:
+            results[issue_id] = None
+            continue
+        team_key = match.group(1).upper()
+        number = int(match.group(2))
+
+        query = """
+        query($teamKey: String!, $number: Float!) {
+            issues(filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }, first: 1) {
+                nodes { identifier state { type } }
+            }
+        }
+        """
+        try:
+            resp = requests.post(
+                LINEAR_API_URL,
+                json={"query": query, "variables": {"teamKey": team_key, "number": number}},
+                headers=headers, timeout=30,
+            )
+            nodes = resp.json().get("data", {}).get("issues", {}).get("nodes", [])
+            results[issue_id] = nodes[0]["state"]["type"] if nodes else None
+        except Exception:
+            results[issue_id] = None
+
+    return results
+
+
 def _format_linear_comments(data: dict) -> str:
     """Format Linear issue comments and attachments into readable text for prompts."""
     parts = []
@@ -1530,6 +1564,7 @@ def cmd_status(_args: argparse.Namespace) -> None:
         "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
         "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
         "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
+        "completed": 11, "canceled": 12, "archived": 13,
     }
     sorted_items = sorted(tracked.values(), key=lambda t: status_order.get(t["status"], 99))
 
@@ -2463,20 +2498,73 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
     log(f"Notified {notified} issue(s) as ready for review.")
 
 
+TERMINAL_STATUSES = {"completed", "canceled", "archived"}
+NON_ACTIONABLE_STATE_TYPES = {"completed", "canceled"}
+
+
+def cmd_sync(_args: argparse.Namespace) -> None:
+    """Sync tracking state with Linear. Archive issues no longer actionable."""
+    tracked = load_all_tracking()
+    to_check = {
+        iid: t for iid, t in tracked.items()
+        if t["status"] not in TERMINAL_STATUSES
+    }
+    if not to_check:
+        log("Nothing to sync.")
+        return
+
+    log(f"Checking {len(to_check)} tracked issue(s) against Linear...")
+    state_types = fetch_issue_state_types(list(to_check.keys()))
+
+    archived = 0
+    completed = 0
+    for iid, t in to_check.items():
+        state_type = state_types.get(iid)
+        if state_type not in NON_ACTIONABLE_STATE_TYPES:
+            continue
+
+        prs = t.get("pull_requests", {})
+        has_merged_pr = any(
+            fetch_pr_state(pr.get("url", "")) == "merged"
+            for pr in prs.values() if pr and pr.get("url")
+        )
+
+        if has_merged_pr:
+            t["status"] = "completed"
+            t["completed_at"] = now_iso()
+            save_tracking(iid, t)
+            log(f"Marked completed (PRs merged)", issue=iid)
+            completed += 1
+        else:
+            t["status"] = "archived"
+            t["archived_at"] = now_iso()
+            t["archive_reason"] = f"Linear state: {state_type}"
+            save_tracking(iid, t)
+            log(f"Archived (Linear state: {state_type})", issue=iid)
+            archived += 1
+
+    log(f"Sync done: {archived} archived, {completed} completed.")
+
+
 def cmd_sweep(args: argparse.Namespace) -> None:
-    """Full automated sweep: triage → implement → revise → notify_ready."""
+    """Full automated sweep: sync → triage → implement → revise → notify_ready."""
     log("=" * 60)
-    log("SWEEP: Stage 1/4 — Triage")
+    log("SWEEP: Stage 1/5 — Sync with Linear")
+    log("=" * 60)
+    cmd_sync(args)
+
+    log("=" * 60)
+    log("SWEEP: Stage 2/5 — Triage")
     log("=" * 60)
     cmd_triage(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 2/4 — Implement")
+    log("SWEEP: Stage 3/5 — Implement")
     log("=" * 60)
     cmd_implement(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 3/4 — Revise")
+    log("SWEEP: Stage 4/5 — Revise")
     log("=" * 60)
     revise_args = argparse.Namespace(
         issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
@@ -2486,7 +2574,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     cmd_revise(revise_args)
 
     log("=" * 60)
-    log("SWEEP: Stage 4/4 — Notify Ready")
+    log("SWEEP: Stage 5/5 — Notify Ready")
     log("=" * 60)
     notify_args = argparse.Namespace(issue_ids=[], limit=getattr(args, "limit", None))
     cmd_notify_ready(notify_args)
@@ -2572,7 +2660,10 @@ def main():
     _add_workers_arg(p_retry)
     p_retry.set_defaults(func=cmd_retry)
 
-    p_sweep = sub.add_parser("sweep", help="Full automated sweep: triage → implement → revise → notify_ready")
+    p_sync = sub.add_parser("sync", help="Sync tracking with Linear: archive issues no longer actionable")
+    p_sync.set_defaults(func=cmd_sync)
+
+    p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → revise → notify_ready")
     p_sweep.add_argument("--limit", type=int, default=None, help="Max issues to triage")
     p_sweep.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,

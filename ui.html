@@ -27,6 +27,13 @@
   .btn-blue { background: #1a3a5c; border-color: var(--blue); color: var(--blue); }
   .btn-teal { background: #133a36; border-color: var(--teal); color: var(--teal); }
 
+  [data-tip] { position: relative; }
+  [data-tip]:hover::after {
+    content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; white-space: nowrap; z-index: 200; pointer-events: none;
+  }
+
   .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
 
   /* Status badges */
@@ -123,7 +130,7 @@
   <h1>🏐 Spiky</h1>
   <div class="header-actions">
     <div class="cmd-group">
-      <button class="btn btn-yellow" id="btn-triage" onclick="toggleCmd('triage')">Triage ▾</button>
+      <button class="btn btn-yellow" id="btn-triage" onclick="toggleCmd('triage')" data-tip="Fetch new Linear issues and classify them by complexity">Triage ▾</button>
       <div class="cmd-dropdown" id="cmd-triage">
         <label>Limit (max issues)</label>
         <input type="number" id="triage-limit" placeholder="all" min="1">
@@ -142,7 +149,7 @@
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn btn-primary" id="btn-implement" onclick="toggleCmd('implement')">Implement ▾</button>
+      <button class="btn btn-primary" id="btn-implement" onclick="toggleCmd('implement')" data-tip="Run the coding agent on approved issues">Implement ▾</button>
       <div class="cmd-dropdown" id="cmd-implement">
         <label>Limit (max issues)</label>
         <input type="number" id="impl-limit" placeholder="all" min="1">
@@ -159,7 +166,7 @@
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn btn-blue" id="btn-revise" onclick="toggleCmd('revise')">Revise ▾</button>
+      <button class="btn btn-blue" id="btn-revise" onclick="toggleCmd('revise')" data-tip="Address PR review feedback on pushed issues">Revise ▾</button>
       <div class="cmd-dropdown" id="cmd-revise">
         <label>Limit (max issues)</label>
         <input type="number" id="revise-limit" placeholder="all" min="1">
@@ -176,7 +183,7 @@
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Sweep ▾</button>
+      <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)" data-tip="Full pipeline: sync → triage → implement → revise → notify">Sweep ▾</button>
       <div class="cmd-dropdown" id="cmd-sweep">
         <label>Limit (max triage)</label>
         <input type="number" id="sweep-limit" placeholder="all" min="1">
@@ -194,7 +201,8 @@
         <button class="btn btn-sm" onclick="launchSweep()" style="width:100%;background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Run Sweep</button>
       </div>
     </div>
-    <button class="btn btn-teal btn-sm" onclick="runJob('notify_ready')" title="Check PRs and notify reviewer">Notify Ready</button>
+    <button class="btn btn-sm" onclick="runJob('sync')" data-tip="Archive issues no longer actionable in Linear" style="background:#1a2a1a;border-color:var(--green);color:var(--green)">Sync</button>
+    <button class="btn btn-teal btn-sm" onclick="runJob('notify_ready')" data-tip="Check PRs and notify reviewer when ready">Notify Ready</button>
     <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
       Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
     </button>
@@ -302,12 +310,12 @@ function render() {
       <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
       <td class="actions-cell">${runningIssues.has(t.issue_id)
         ? '<span class="spinner"></span> <span style="font-size:12px;color:var(--text2)">running</span>'
-        : `${t.status === 'awaiting_approval' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); approve('${t.issue_id}')">Approve</button>` : ''}
-        ${t.status === 'approved' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('implement','${t.issue_id}')">Implement</button>` : ''}
-        ${t.status === 'pushed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('revise','${t.issue_id}')">Revise</button>` : ''}
-        ${t.status === 'implemented' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('push','${t.issue_id}')">Push</button>` : ''}
-        ${t.status === 'failed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('retry','${t.issue_id}')">Retry</button>` : ''}
-        ${t.status === 'needs_clarification' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('ask_clarification','${t.issue_id}')">Ask Clarification</button>` : ''}`}
+        : `        ${t.status === 'awaiting_approval' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); approve('${t.issue_id}')" data-tip="Approve the plan and allow implementation">Approve</button>` : ''}
+        ${t.status === 'approved' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('implement','${t.issue_id}')" data-tip="Run the coding agent to implement this issue">Implement</button>` : ''}
+        ${t.status === 'pushed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('revise','${t.issue_id}')" data-tip="Address PR review feedback">Revise</button>` : ''}
+        ${t.status === 'implemented' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('push','${t.issue_id}')" data-tip="Push branch and create a PR">Push</button>` : ''}
+        ${t.status === 'failed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('retry','${t.issue_id}')" data-tip="Retry failed triage or implementation">Retry</button>` : ''}
+        ${t.status === 'needs_clarification' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('ask_clarification','${t.issue_id}')" data-tip="Post a clarification question on Linear">Ask Clarification</button>` : ''}`}
       </td>
     </tr>`;
 
@@ -386,8 +394,8 @@ function renderDetail(t) {
       </div>
     </div>
     ${canEdit ? `<div class="detail-actions">
-      <button class="btn" onclick="event.stopPropagation(); savePlan('${t.issue_id}')">Save Plan</button>
-      <button class="btn btn-primary" onclick="event.stopPropagation(); savePlanAndApprove('${t.issue_id}')">Save &amp; Approve</button>
+      <button class="btn" onclick="event.stopPropagation(); savePlan('${t.issue_id}')" data-tip="Save edits without approving">Save Plan</button>
+      <button class="btn btn-primary" onclick="event.stopPropagation(); savePlanAndApprove('${t.issue_id}')" data-tip="Save edits and approve for implementation">Save &amp; Approve</button>
     </div>` : ''}
   </div>`;
 }

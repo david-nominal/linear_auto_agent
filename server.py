@@ -20,12 +20,13 @@ LOGS_DIR = DATA_DIR / "logs"
 UI_FILE = BASE_DIR / "ui.html"
 SCHEDULES_FILE = DATA_DIR / "schedules.json"
 
-SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep", "notify_ready")
+SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep", "notify_ready", "sync")
 
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
     "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
     "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
+    "completed": 11, "canceled": 12, "archived": 13,
 }
 
 # Job tracking (in-memory for current session)
@@ -229,7 +230,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/issues":
-            self._json_response(_load_all_tracking())
+            all_tracking = _load_all_tracking()
+            visible = [t for t in all_tracking if t.get("status") != "archived"]
+            self._json_response(visible)
             return
 
         if path.startswith("/api/issues/") and path.count("/") == 3:
@@ -358,7 +361,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/jobs/"):
             command = path.split("/")[3]
-            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification", "sweep", "notify_ready"):
+            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification", "sweep", "notify_ready", "sync"):
                 self._json_response({"error": f"unknown command: {command}"}, 400)
                 return
             body = self._read_body()
