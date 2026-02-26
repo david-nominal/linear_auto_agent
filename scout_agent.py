@@ -191,6 +191,98 @@ def fetch_issues() -> list[dict]:
     return all_issues
 
 
+def fetch_issue_comments(issue_id: str) -> dict:
+    """Fetch comments and attachments for a single Linear issue by identifier (e.g. 'ENG-123')."""
+    match = re.match(r"^([A-Za-z]+)-(\d+)$", issue_id)
+    if not match:
+        log(f"Cannot parse identifier for comments lookup", issue=issue_id, file=sys.stderr)
+        return {"comments": [], "attachments": []}
+    team_key = match.group(1).upper()
+    number = int(match.group(2))
+
+    query = """
+    query($teamKey: String!, $number: Float!) {
+        issues(
+            filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }
+            first: 1
+        ) {
+            nodes {
+                comments(first: 50) {
+                    nodes {
+                        body
+                        user { name }
+                        createdAt
+                    }
+                }
+                attachments(first: 20) {
+                    nodes { url title subtitle }
+                }
+            }
+        }
+    }
+    """
+    headers = {"Authorization": linear_api_key(), "Content-Type": "application/json"}
+    resp = requests.post(
+        LINEAR_API_URL,
+        json={"query": query, "variables": {"teamKey": team_key, "number": number}},
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        log(f"Failed to fetch comments (HTTP {resp.status_code})", issue=issue_id, file=sys.stderr)
+        return {"comments": [], "attachments": []}
+
+    data = resp.json()
+    nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
+    issue_data = nodes[0] if nodes else None
+    if not issue_data:
+        log(f"No issue data in comments response", issue=issue_id, file=sys.stderr)
+        return {"comments": [], "attachments": []}
+
+    comments = []
+    for node in issue_data.get("comments", {}).get("nodes", []):
+        comments.append({
+            "author": node.get("user", {}).get("name", "Unknown"),
+            "created_at": node.get("createdAt", ""),
+            "body": node.get("body", ""),
+        })
+
+    attachments = []
+    for node in issue_data.get("attachments", {}).get("nodes", []):
+        attachments.append({
+            "title": node.get("title") or node.get("subtitle") or "",
+            "url": node.get("url", ""),
+        })
+
+    return {"comments": comments, "attachments": attachments}
+
+
+def _format_linear_comments(data: dict) -> str:
+    """Format Linear issue comments and attachments into readable text for prompts."""
+    parts = []
+
+    comments = data.get("comments", [])
+    if comments:
+        for c in comments:
+            author = c.get("author", "Unknown")
+            date = c.get("created_at", "")[:10]
+            body = c.get("body", "").strip()
+            if body:
+                parts.append(f"**{author}** ({date}):\n{body}")
+    else:
+        parts.append("(no comments)")
+
+    attachments = data.get("attachments", [])
+    if attachments:
+        parts.append("\n### Attachments")
+        for a in attachments:
+            title = a.get("title", "Untitled")
+            url = a.get("url", "")
+            parts.append(f"- [{title}]({url})" if url else f"- {title}")
+
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Tracking
 # ---------------------------------------------------------------------------
@@ -347,6 +439,10 @@ You are triaging a Linear issue for an automated agent system.
 ## Issue: {id} — {title}
 
 {description}
+
+## Comments
+
+{comments}
 
 ## Context
 
@@ -1032,6 +1128,9 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
     """Triage a single issue and generate a plan if easy/medium. Returns tracking data."""
     iid = issue["id"]
     log(f"Triaging: {issue['title']}", issue=iid)
+
+    comment_data = fetch_issue_comments(iid)
+    issue["comments"] = _format_linear_comments(comment_data)
 
     decision = triage_issue(issue, workspace)
     repos = decision.get("repos", [])
