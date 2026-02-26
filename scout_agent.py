@@ -132,7 +132,15 @@ def extract_and_download_images(
 
     for url, source in to_download:
         try:
-            resp = requests.get(url, timeout=15, stream=True)
+            headers = {}
+            parsed_host = urlparse(url).hostname or ""
+            if parsed_host == "uploads.linear.app":
+                headers["Authorization"] = linear_api_key()
+            elif parsed_host.endswith("githubusercontent.com"):
+                gh_token = os.environ.get("GH_TOKEN", "")
+                if gh_token:
+                    headers["Authorization"] = f"token {gh_token}"
+            resp = requests.get(url, timeout=15, stream=True, headers=headers)
             resp.raise_for_status()
             content = resp.content
             url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
