@@ -467,9 +467,13 @@ def post_linear_comment(issue_id: str, body: str) -> bool:
         headers=headers, timeout=30,
     )
     if resp.status_code != 200:
-        log(f"Failed to post comment (HTTP {resp.status_code})", issue=issue_id, file=sys.stderr)
+        log(f"Failed to post comment (HTTP {resp.status_code}): {resp.text[:500]}", issue=issue_id, file=sys.stderr)
         return False
-    success = resp.json().get("data", {}).get("commentCreate", {}).get("success", False)
+    result = resp.json()
+    if "errors" in result:
+        log(f"GraphQL errors on commentCreate: {result['errors']}", issue=issue_id, file=sys.stderr)
+        return False
+    success = result.get("data", {}).get("commentCreate", {}).get("success", False)
     if not success:
         log(f"commentCreate returned success=false", issue=issue_id, file=sys.stderr)
     return success
@@ -545,6 +549,9 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
     if log_name:
         log_path = LOGS_DIR / f"{log_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.exists():
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            log_path = LOGS_DIR / f"{log_name}-{ts}.log"
 
     issue_hint = ""
     if log_name:
@@ -1471,7 +1478,7 @@ def cmd_triage(args: argparse.Namespace) -> None:
             log(f"New comment found after clarification — re-triaging", issue=t["issue_id"])
             clarification_retriage.append(issue)
 
-    to_triage = untracked + clarification_retriage
+    to_triage = clarification_retriage + untracked
     if args.limit:
         to_triage = to_triage[:args.limit]
         log(f"Limited to {args.limit} issues")

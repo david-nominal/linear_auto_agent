@@ -261,6 +261,7 @@ async function fetchIssues() {
       }
     }
     render();
+    if (expandedId) fetchLogLinks(expandedId);
   } catch(e) {
     document.getElementById('emptyState').textContent = 'Failed to connect to server.';
   }
