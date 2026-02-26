@@ -746,7 +746,7 @@ You are addressing PR review feedback on a git worktree.
 
 {prior_log}
 
-## Unresolved review comments
+## Unresolved PR feedback
 
 {comments_formatted}
 
@@ -853,6 +853,29 @@ def resolve_pr_threads(thread_ids: list[str], issue_id: str = "") -> int:
     return resolved
 
 
+def react_to_pr_comments(pr_url: str, database_ids: list[int], issue_id: str = "") -> int:
+    """Add :eyes: reaction to PR issue comments. Returns count of reacted comments."""
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        return 0
+    owner, repo, _number = parsed
+    reacted = 0
+    for cid in database_ids:
+        if not cid:
+            continue
+        result = subprocess.run(
+            ["gh", "api",
+             f"repos/{owner}/{repo}/issues/comments/{cid}/reactions",
+             "-f", "content=eyes"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            reacted += 1
+        else:
+            log(f"Failed to react to comment {cid}: {result.stderr[:200]}", issue=issue_id)
+    return reacted
+
+
 def _parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     """Extract (owner, repo, number) from a GitHub PR URL."""
     match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
@@ -885,6 +908,18 @@ def fetch_pr_comments(pr_url: str) -> list[dict]:
                   line
                   author { login }
                 }
+              }
+            }
+          }
+          comments(first: 100) {
+            nodes {
+              id
+              databaseId
+              body
+              author { login }
+              reactionGroups {
+                content
+                users(first: 1) { totalCount }
               }
             }
           }
@@ -934,11 +969,36 @@ def fetch_pr_comments(pr_url: str) -> list[dict]:
             body_parts.append(f"\n> Reply from {author}: {reply.get('body', '')}")
 
         comments.append({
+            "type": "review_thread",
             "thread_id": thread.get("id"),
             "path": first.get("path"),
             "line": first.get("line"),
             "author": first.get("author", {}).get("login", "unknown"),
             "body": "\n".join(body_parts),
+        })
+
+    # PR-level issue comments (conversation tab)
+    issue_comments = pr_data.get("comments", {}).get("nodes", [])
+    for ic in issue_comments:
+        author = ic.get("author", {}).get("login", "unknown")
+        if author.endswith("[bot]"):
+            continue
+        # Skip if already reacted with EYES
+        has_eyes = False
+        for rg in ic.get("reactionGroups", []):
+            if rg.get("content") == "EYES" and rg.get("users", {}).get("totalCount", 0) > 0:
+                has_eyes = True
+                break
+        if has_eyes:
+            continue
+        body = ic.get("body", "").strip()
+        if not body:
+            continue
+        comments.append({
+            "type": "issue_comment",
+            "database_id": ic.get("databaseId"),
+            "author": author,
+            "body": body,
         })
 
     return comments
@@ -951,13 +1011,15 @@ def _format_comments_for_prompt(comments: list[dict]) -> str:
 
     parts = []
     for i, c in enumerate(comments, 1):
+        ctype = c.get("type", "review_thread")
+        label = "[PR comment]" if ctype == "issue_comment" else "[Code review]"
         location = ""
         if c.get("path"):
             location = f" in `{c['path']}`"
             if c.get("line"):
                 location += f" (line {c['line']})"
         author = c.get("author", "unknown")
-        parts.append(f"{i}. **{author}**{location}:\n   {c['body']}")
+        parts.append(f"{i}. {label} **{author}**{location}:\n   {c['body']}")
 
     return "\n\n".join(parts)
 
@@ -1587,6 +1649,11 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict
     if thread_ids:
         resolved = resolve_pr_threads(thread_ids, issue_id=issue_id)
         log(f"{repo_key}: resolved {resolved}/{len(thread_ids)} review thread(s)", issue=issue_id)
+
+    ic_ids = [c.get("database_id") for c in comments if c.get("type") == "issue_comment" and c.get("database_id")]
+    if ic_ids:
+        reacted = react_to_pr_comments(pr_url, ic_ids, issue_id=issue_id)
+        log(f"{repo_key}: reacted to {reacted}/{len(ic_ids)} PR comment(s)", issue=issue_id)
 
     return {
         "repo": repo_key,
