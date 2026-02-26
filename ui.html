@@ -180,7 +180,7 @@
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)" data-tip="Full pipeline: sync → triage → implement → revise → notify">Sweep ▾</button>
+      <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)" data-tip="Full pipeline: sync → triage → implement → push → revise → notify">Sweep ▾</button>
       <div class="cmd-dropdown" id="cmd-sweep">
         <label>Limit (max active tasks)</label>
         <input type="number" id="sweep-limit" placeholder="all" min="1">
@@ -211,6 +211,7 @@
     <thead>
       <tr>
         <th>Issue</th>
+        <th>PRs</th>
         <th>Status</th>
         <th>Complexity</th>
         <th>Repos</th>
@@ -299,8 +300,11 @@ function render() {
     const branches = Object.values(impls).filter(v => v && v.worktree_branch).map(v => v.worktree_branch);
     if (branches.length) summary = '[' + branches.join(', ') + '] ' + summary;
 
+    const prLinks = Object.entries(t.pull_requests || {}).filter(([,pr]) => pr && pr.url).map(([repo, pr]) => `<a class="issue-id" href="${pr.url}" target="_blank" onclick="event.stopPropagation()" style="font-size:12px">${repo}</a>`).join(' ');
+
     html += `<tr class="row ${isExpanded ? 'expanded' : ''}" onclick="toggleDetail('${t.issue_id}')">
       <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
+      <td>${prLinks || '<span style="color:var(--text2)">-</span>'}</td>
       <td><span class="badge badge-${t.status}">${t.status}</span>${t.ready_notified_at ? ' <span class="badge badge-ready" title="Reviewer notified ' + shortDate(t.ready_notified_at) + '">ready</span>' : ''}${t.revision_count ? ` <span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
       <td>${complexity}</td>
       <td class="repos">${repos}</td>
@@ -317,7 +321,7 @@ function render() {
     </tr>`;
 
     if (isExpanded) {
-      html += `<tr class="detail-row"><td colspan="6">${renderDetail(t)}</td></tr>`;
+      html += `<tr class="detail-row"><td colspan="7">${renderDetail(t)}</td></tr>`;
     }
   }
   tbody.innerHTML = html;

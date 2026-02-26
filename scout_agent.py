@@ -997,7 +997,23 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
         wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
         if wt_result.returncode != 0:
             if "already exists" in wt_result.stderr:
-                log(f"Worktree/branch {branch_name} already exists, reusing", issue=issue_id)
+                if not os.path.isdir(worktree_path):
+                    log(f"Stale branch/worktree for {branch_name}, cleaning up and recreating", issue=issue_id)
+                    subprocess.run(["git", "-C", repo_path, "worktree", "remove", "--force", worktree_path],
+                                   capture_output=True, text=True)
+                    subprocess.run(["git", "-C", repo_path, "branch", "-D", branch_name],
+                                   capture_output=True, text=True)
+                    wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
+                    if wt_result.returncode != 0:
+                        return {
+                            "repo": repo_key,
+                            "error": f"Failed to recreate worktree: {wt_result.stderr}",
+                            "exit_code": -1,
+                            "started_at": now_iso(),
+                            "completed_at": now_iso(),
+                        }
+                else:
+                    log(f"Worktree/branch {branch_name} already exists, reusing", issue=issue_id)
             else:
                 return {
                     "repo": repo_key,
@@ -1828,7 +1844,7 @@ def cmd_retry(args: argparse.Namespace) -> None:
     else:
         issue_ids = [
             t["issue_id"] for t in tracked.values()
-            if t["status"] in ("triage_failed", "failed")
+            if t["status"] in ("triage_failed", "failed", "implemented")
         ]
 
     if not issue_ids:
@@ -1837,6 +1853,7 @@ def cmd_retry(args: argparse.Namespace) -> None:
 
     triage_targets = []
     impl_targets = []
+    push_targets = []
     for iid in issue_ids:
         t = tracked.get(iid)
         if not t:
@@ -1846,6 +1863,8 @@ def cmd_retry(args: argparse.Namespace) -> None:
             triage_targets.append(t)
         elif t["status"] == "failed":
             impl_targets.append(t)
+        elif t["status"] == "implemented":
+            push_targets.append(t)
         else:
             log(f"Status is '{t['status']}', nothing to retry", issue=iid)
 
@@ -1886,6 +1905,13 @@ def cmd_retry(args: argparse.Namespace) -> None:
                     log(f"Re-implementation: {updated['status']}", issue=updated["issue_id"])
                 except Exception as exc:
                     log(f"Re-implementation failed: {exc}", issue=orig["issue_id"], file=sys.stderr)
+
+    if push_targets:
+        log(f"Pushing {len(push_targets)} implemented issue(s)...")
+        push_args = argparse.Namespace(
+            issue_ids=[t["issue_id"] for t in push_targets], all=False,
+        )
+        cmd_push(push_args)
 
 
 def _post_clarification(tracking: dict) -> bool:
@@ -2560,24 +2586,30 @@ def cmd_sync(_args: argparse.Namespace) -> None:
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
-    """Full automated sweep: sync → triage → implement → revise → notify_ready."""
+    """Full automated sweep: sync → triage → implement → push → revise → notify_ready."""
     log("=" * 60)
-    log("SWEEP: Stage 1/5 — Sync with Linear")
+    log("SWEEP: Stage 1/6 — Sync with Linear")
     log("=" * 60)
     cmd_sync(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 2/5 — Triage")
+    log("SWEEP: Stage 2/6 — Triage")
     log("=" * 60)
     cmd_triage(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 3/5 — Implement")
+    log("SWEEP: Stage 3/6 — Implement")
     log("=" * 60)
     cmd_implement(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 4/5 — Revise")
+    log("SWEEP: Stage 4/6 — Push")
+    log("=" * 60)
+    push_args = argparse.Namespace(issue_ids=[], all=True)
+    cmd_push(push_args)
+
+    log("=" * 60)
+    log("SWEEP: Stage 5/6 — Revise")
     log("=" * 60)
     revise_args = argparse.Namespace(
         issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
@@ -2586,7 +2618,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     cmd_revise(revise_args)
 
     log("=" * 60)
-    log("SWEEP: Stage 5/5 — Notify Ready")
+    log("SWEEP: Stage 6/6 — Notify Ready")
     log("=" * 60)
     notify_args = argparse.Namespace(issue_ids=[])
     cmd_notify_ready(notify_args)
@@ -2674,7 +2706,7 @@ def main():
     p_sync = sub.add_parser("sync", help="Sync tracking with Linear: archive issues no longer actionable")
     p_sync.set_defaults(func=cmd_sync)
 
-    p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → revise → notify_ready")
+    p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → push → revise → notify_ready")
     p_sweep.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_sweep.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
