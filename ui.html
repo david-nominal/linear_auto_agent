@@ -417,7 +417,10 @@ async function pollJobs() {
           <span><b>${j.command}${esc(args)}</b></span>
           <span>${status} ${j.finished_at ? shortDate(j.finished_at) : 'running...'} ${killBtn}</span>
         </div>
-        <pre>${esc(j.output || '(waiting...)')}</pre>
+        <div style="position:relative">
+          <button class="btn btn-sm" style="position:absolute;top:4px;right:4px;font-size:11px;padding:2px 6px;opacity:0.7" onclick="copyLog(this)">Copy</button>
+          <pre>${esc(j.output || '(waiting...)')}</pre>
+        </div>
       </div>`;
     }).join('');
 
@@ -427,6 +430,11 @@ async function pollJobs() {
 
 function pauseRefresh() { clearInterval(refreshTimer); refreshTimer = null; }
 function resumeRefresh() { if (!refreshTimer) refreshTimer = setInterval(fetchIssues, 5000); }
+
+function copyLog(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  navigator.clipboard.writeText(pre.textContent).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); });
+}
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function truncate(s, n) { return s.length > n ? s.slice(0, n) + '...' : s; }
