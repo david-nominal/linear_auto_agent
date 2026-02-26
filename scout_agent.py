@@ -2,6 +2,7 @@
 """Spiky: fetch open issues, triage, plan, and implement via cursor agent CLI."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -64,6 +66,117 @@ def _fmt_duration(seconds: float) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Image extraction & downloading
+# ---------------------------------------------------------------------------
+
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+_IMAGE_HOSTS = {"uploads.linear.app", "user-images.githubusercontent.com",
+                "github.com", "private-user-images.githubusercontent.com"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+MAX_IMAGES_PER_ISSUE = 10
+
+
+def _is_image_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if any(h in host for h in _IMAGE_HOSTS):
+        return True
+    path_lower = parsed.path.lower()
+    return any(path_lower.endswith(ext) for ext in _IMAGE_EXTS)
+
+
+def extract_and_download_images(
+    texts: list[tuple[str, str]],
+    dest_dir: str | Path,
+    issue_id: str = "",
+) -> list[dict]:
+    """Extract markdown image URLs from texts and download them.
+
+    Args:
+        texts: list of (markdown_text, source_label) pairs,
+               e.g. [("![img](url)", "issue description"), ...]
+        dest_dir: directory to save images into (a .scout-images/ subdir is created)
+        issue_id: for logging
+
+    Returns:
+        list of dicts with keys: local_path, source, url
+    """
+    images_dir = Path(dest_dir) / ".scout-images"
+    seen_urls: set[str] = set()
+    to_download: list[tuple[str, str]] = []  # (url, source_label)
+
+    for text, source in texts:
+        if not text:
+            continue
+        for _alt, url in _IMAGE_RE.findall(text):
+            url = url.strip()
+            if url in seen_urls or not _is_image_url(url):
+                continue
+            seen_urls.add(url)
+            to_download.append((url, source))
+            if len(to_download) >= MAX_IMAGES_PER_ISSUE:
+                break
+        if len(to_download) >= MAX_IMAGES_PER_ISSUE:
+            break
+
+    if not to_download:
+        return []
+
+    images_dir.mkdir(parents=True, exist_ok=True)
+    downloaded: list[dict] = []
+
+    for url, source in to_download:
+        try:
+            resp = requests.get(url, timeout=15, stream=True)
+            resp.raise_for_status()
+            content = resp.content
+            url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
+            content_type = resp.headers.get("content-type", "")
+            ext = ".png"
+            if "jpeg" in content_type or "jpg" in content_type:
+                ext = ".jpg"
+            elif "gif" in content_type:
+                ext = ".gif"
+            elif "webp" in content_type:
+                ext = ".webp"
+            else:
+                parsed_path = urlparse(url).path.lower()
+                for e in _IMAGE_EXTS:
+                    if parsed_path.endswith(e):
+                        ext = e
+                        break
+
+            filename = f"{url_hash}{ext}"
+            local_path = images_dir / filename
+            local_path.write_bytes(content)
+            downloaded.append({"local_path": str(local_path), "source": source, "url": url})
+            log(f"Downloaded image {filename} ({len(content)} bytes, from {source})", issue=issue_id)
+        except Exception as exc:
+            log(f"Failed to download image from {source}: {exc}", issue=issue_id)
+
+    if downloaded:
+        log(f"Downloaded {len(downloaded)} image(s) total", issue=issue_id)
+
+    return downloaded
+
+
+def format_images_for_prompt(downloaded: list[dict]) -> str:
+    """Build prompt section listing downloaded images. Returns empty string if none."""
+    if not downloaded:
+        return ""
+    lines = [
+        "\n\n## Attached images\n",
+        "The following images were attached to the issue or review comments. "
+        "Read them to understand visual context:\n",
+    ]
+    for img in downloaded:
+        lines.append(f"- {img['local_path']} (from {img['source']})")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +888,10 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
     else:
         be_note = ""
 
+    image_texts: list[tuple[str, str]] = [(tracking.get("description", ""), "issue description")]
+    impl_images = extract_and_download_images(image_texts, worktree_path, issue_id=issue_id)
+    images_section = format_images_for_prompt(impl_images)
+
     if repo_key == "backend":
         prompt = IMPLEMENT_PROMPT_BACKEND.format(
             id=issue_id, title=tracking["title"],
@@ -788,6 +905,9 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
             plan=tracking.get("plan", "No plan available"),
             be_note=be_note,
         )
+
+    if images_section:
+        prompt += images_section
 
     model = os.environ.get("IMPL_MODEL") or None
     started_at = now_iso()
@@ -1132,6 +1252,14 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
     comment_data = fetch_issue_comments(iid)
     issue["comments"] = _format_linear_comments(comment_data)
 
+    image_texts: list[tuple[str, str]] = [(issue.get("description", ""), "issue description")]
+    for c in comment_data.get("comments", []):
+        image_texts.append((c.get("body", ""), f"comment by {c.get('author', 'unknown')}"))
+    downloaded = extract_and_download_images(image_texts, workspace, issue_id=iid)
+    images_section = format_images_for_prompt(downloaded)
+    if images_section:
+        issue["description"] = issue.get("description", "") + images_section
+
     decision = triage_issue(issue, workspace)
     repos = decision.get("repos", [])
     repos_str = ", ".join(repos) if repos else "none"
@@ -1286,6 +1414,12 @@ def _self_review_repo(tracking: dict, repo_key: str) -> str | None:
         default_branch=default_branch,
     )
 
+    image_texts: list[tuple[str, str]] = [(tracking.get("description", ""), "issue description")]
+    review_images = extract_and_download_images(image_texts, worktree_path, issue_id=issue_id)
+    images_section = format_images_for_prompt(review_images)
+    if images_section:
+        prompt += images_section
+
     model = os.environ.get("IMPL_MODEL") or None
     log_name = f"{issue_id}-{repo_key}-review"
     log(f"{repo_key}: running self-review...", issue=issue_id)
@@ -1330,6 +1464,12 @@ def _review_revise_loop(tracking: dict, repo_key: str, max_revisions: int) -> in
             plan=tracking.get("plan", "No plan available"),
             feedback=feedback,
         )
+
+        image_texts: list[tuple[str, str]] = [(tracking.get("description", ""), "issue description")]
+        revise_images = extract_and_download_images(image_texts, worktree_path, issue_id=issue_id)
+        images_section = format_images_for_prompt(revise_images)
+        if images_section:
+            prompt += images_section
 
         model = os.environ.get("IMPL_MODEL") or None
         log_name = f"{issue_id}-{repo_key}-review-revise-{rev_count}"
@@ -1717,6 +1857,14 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict
         prior_log=prior_log or "No prior log available",
         comments_formatted=comments_formatted,
     )
+
+    image_texts: list[tuple[str, str]] = [(tracking.get("description", ""), "issue description")]
+    for c in comments:
+        image_texts.append((c.get("body", ""), f"PR comment by {c.get('author', 'unknown')}"))
+    revise_images = extract_and_download_images(image_texts, worktree_path, issue_id=issue_id)
+    images_section = format_images_for_prompt(revise_images)
+    if images_section:
+        prompt += images_section
 
     model = os.environ.get("IMPL_MODEL") or None
     log_name = f"{issue_id}-{repo_key}-revise"
