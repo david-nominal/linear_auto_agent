@@ -508,12 +508,18 @@ async function pollJobs() {
     const list = document.getElementById('jobsList');
     if (!jobs.length) { list.innerHTML = '<div style="padding:20px;color:var(--text2);text-align:center">No jobs yet</div>'; return; }
 
+    const scrollPositions = {};
+    list.querySelectorAll('.job-card[data-job-id]').forEach(card => {
+      const pre = card.querySelector('pre');
+      if (pre) scrollPositions[card.dataset.jobId] = pre.scrollTop;
+    });
+
     list.innerHTML = jobs.slice().reverse().map(j => {
       const isRunning = j.finished_at === null;
       const status = isRunning ? '<span class="spinner"></span>' : (j.exit_code === 0 ? '✓' : '✗');
       const args = j.args.length ? ' ' + j.args.join(' ') : '';
       const killBtn = isRunning ? `<button class="btn btn-sm" style="color:var(--red);border-color:var(--red);margin-left:8px" onclick="killJob('${j.id}')">Kill</button>` : '';
-      return `<div class="job-card">
+      return `<div class="job-card" data-job-id="${j.id}">
         <div class="job-card-header">
           <span><b>${j.command}${esc(args)}</b></span>
           <span>${status} ${j.finished_at ? shortDate(j.finished_at) : 'running...'} ${killBtn}</span>
@@ -524,6 +530,11 @@ async function pollJobs() {
         </div>
       </div>`;
     }).join('');
+
+    list.querySelectorAll('.job-card[data-job-id]').forEach(card => {
+      const pre = card.querySelector('pre');
+      if (pre && scrollPositions[card.dataset.jobId] !== undefined) pre.scrollTop = scrollPositions[card.dataset.jobId];
+    });
 
     if (running > 0) { clearTimeout(jobsTimer); jobsTimer = setTimeout(pollJobs, 2000); fetchIssues(); }
   } catch(e) {}
