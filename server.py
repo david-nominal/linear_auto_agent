@@ -18,6 +18,9 @@ DATA_DIR = BASE_DIR / "data"
 TRACKING_DIR = DATA_DIR / "tracking"
 LOGS_DIR = DATA_DIR / "logs"
 UI_FILE = BASE_DIR / "ui.html"
+SCHEDULES_FILE = DATA_DIR / "schedules.json"
+
+SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry")
 
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
@@ -29,6 +32,57 @@ STATUS_ORDER = {
 _jobs: dict[str, dict] = {}
 _job_procs: dict[str, subprocess.Popen] = {}
 _jobs_lock = threading.Lock()
+
+# Schedule tracking
+_last_run: dict[str, float] = {}
+_scheduler_stop = threading.Event()
+
+
+def _load_schedules() -> dict:
+    if SCHEDULES_FILE.exists():
+        try:
+            return json.loads(SCHEDULES_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_schedules(schedules: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SCHEDULES_FILE.write_text(json.dumps(schedules, indent=2) + "\n")
+
+
+def _is_command_running(command: str) -> bool:
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job["command"] == command and job["finished_at"] is None:
+                return True
+    return False
+
+
+def _scheduler_loop() -> None:
+    """Background thread that fires scheduled jobs at their configured intervals."""
+    while not _scheduler_stop.is_set():
+        try:
+            schedules = _load_schedules()
+            now = time.time()
+            for command, sched in schedules.items():
+                interval = sched.get("interval_seconds")
+                if not interval or interval <= 0:
+                    continue
+                last = _last_run.get(command, 0)
+                if now - last < interval:
+                    continue
+                if _is_command_running(command):
+                    continue
+                args = list(sched.get("args", []))
+                if command == "revise" and "--max-revisions" not in args:
+                    args.extend(["--max-revisions", "3"])
+                _last_run[command] = now
+                _run_job(command, args)
+        except Exception:
+            pass
+        _scheduler_stop.wait(30)
 
 
 def _discover_running_jobs(exclude_children_of: set[int] | None = None) -> list[dict]:
@@ -199,6 +253,21 @@ class Handler(SimpleHTTPRequestHandler):
             self._json_response(jobs)
             return
 
+        if path == "/api/schedules":
+            schedules = _load_schedules()
+            now = time.time()
+            result = {}
+            for cmd in SCHEDULABLE_COMMANDS:
+                sched = schedules.get(cmd)
+                if sched and sched.get("interval_seconds"):
+                    last = _last_run.get(cmd, 0)
+                    next_in = max(0, sched["interval_seconds"] - (now - last)) if last else 0
+                    result[cmd] = {**sched, "next_run_in_seconds": round(next_in)}
+                else:
+                    result[cmd] = None
+            self._json_response(result)
+            return
+
         if path.startswith("/api/logs/") and path.count("/") == 3:
             log_name = path.split("/")[3]
             log_file = LOGS_DIR / log_name
@@ -295,6 +364,26 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PUT(self):
         path = self.path.split("?")[0]
 
+        if path.startswith("/api/schedules/") and path.count("/") == 3:
+            command = path.split("/")[3]
+            if command not in SCHEDULABLE_COMMANDS:
+                self._json_response({"error": f"unknown command: {command}"}, 400)
+                return
+            body = json.loads(self._read_body())
+            schedules = _load_schedules()
+            interval = body.get("interval_seconds")
+            if interval and interval > 0:
+                schedules[command] = {
+                    "interval_seconds": int(interval),
+                    "args": body.get("args", []),
+                }
+            else:
+                schedules.pop(command, None)
+                _last_run.pop(command, None)
+            _save_schedules(schedules)
+            self._json_response({"ok": True})
+            return
+
         if path.startswith("/api/issues/") and path.endswith("/plan"):
             parts = path.split("/")
             issue_id = parts[3]
@@ -319,11 +408,14 @@ class ReusableHTTPServer(HTTPServer):
 def main():
     port = 8111
     server = ReusableHTTPServer(("127.0.0.1", port), Handler)
+    scheduler = threading.Thread(target=_scheduler_loop, daemon=True)
+    scheduler.start()
     print(f"Spiky running at http://localhost:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down.")
+        _scheduler_stop.set()
         server.shutdown()
 
 

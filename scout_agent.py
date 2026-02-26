@@ -1461,6 +1461,7 @@ def _revise_issue(tracking: dict) -> dict:
         return tracking
 
     revisions = tracking.get("revisions", [])
+    revisions_before = len(revisions)
     impls = tracking.get("implementations", {})
 
     # Process BE first so we can link updated APIs into FE
@@ -1493,6 +1494,8 @@ def _revise_issue(tracking: dict) -> dict:
                 be_revised = True
 
     tracking["revisions"] = revisions
+    if revisions_before != len(revisions):
+        tracking["revision_count"] = tracking.get("revision_count", 0) + 1
     return tracking
 
 
@@ -1504,6 +1507,14 @@ def cmd_revise(args: argparse.Namespace) -> None:
         candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
     else:
         candidates = [t for t in tracked.values() if t["status"] == "pushed"]
+
+    max_revisions = getattr(args, "max_revisions", None)
+    if max_revisions is not None:
+        before = len(candidates)
+        candidates = [t for t in candidates if t.get("revision_count", 0) < max_revisions]
+        skipped = before - len(candidates)
+        if skipped:
+            log(f"Skipped {skipped} issue(s) already at {max_revisions}+ revisions")
 
     if not candidates:
         log("No pushed issues with PRs to revise.")
@@ -1587,6 +1598,8 @@ def main():
 
     p_revise = sub.add_parser("revise", help="Address PR review feedback for pushed issues")
     p_revise.add_argument("issue_ids", nargs="*", help="Issue identifiers to revise (default: all pushed)")
+    p_revise.add_argument("--max-revisions", type=int, default=None,
+                          help="Skip issues that already have this many revisions")
     _add_workers_arg(p_revise)
     p_revise.set_defaults(func=cmd_revise)
 

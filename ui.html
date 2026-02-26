@@ -95,6 +95,12 @@
   .cmd-dropdown label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 4px; }
   .cmd-dropdown input { width: 100%; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; margin-bottom: 8px; }
   .cmd-dropdown .cmd-row { display: flex; gap: 8px; align-items: center; }
+  .sched-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .sched-row span { font-size: 12px; color: var(--text2); white-space: nowrap; }
+  .sched-row input[type="number"] { width: 52px; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; margin: 0; }
+  .sched-row select { padding: 4px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; }
+  .sched-active { position: relative; }
+  .sched-dot { position: absolute; top: -2px; left: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 
   .empty { text-align: center; padding: 60px 20px; color: var(--text2); }
 </style>
@@ -105,28 +111,49 @@
   <h1>🏐 Spiky</h1>
   <div class="header-actions">
     <div class="cmd-group">
-      <button class="btn btn-yellow" onclick="toggleCmd('triage')">Triage ▾</button>
+      <button class="btn btn-yellow" id="btn-triage" onclick="toggleCmd('triage')">Triage ▾</button>
       <div class="cmd-dropdown" id="cmd-triage">
         <label>Limit (max issues)</label>
         <input type="number" id="triage-limit" placeholder="all" min="1">
         <label>Workers</label>
         <input type="number" id="triage-workers" value="3" min="1" max="10">
+        <label>Schedule</label>
+        <div class="sched-row">
+          <span>Every</span>
+          <input type="number" id="sched-triage-val" min="1" value="6">
+          <select id="sched-triage-unit"><option value="60">min</option><option value="3600" selected>hr</option></select>
+          <button class="btn btn-sm" id="sched-triage-btn" onclick="toggleSchedule('triage')">Enable</button>
+        </div>
         <button class="btn btn-yellow btn-sm" onclick="launchTriage()" style="width:100%">Run Triage</button>
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn btn-primary" onclick="toggleCmd('implement')">Implement ▾</button>
+      <button class="btn btn-primary" id="btn-implement" onclick="toggleCmd('implement')">Implement ▾</button>
       <div class="cmd-dropdown" id="cmd-implement">
         <label>Workers</label>
         <input type="number" id="impl-workers" value="3" min="1" max="10">
+        <label>Schedule</label>
+        <div class="sched-row">
+          <span>Every</span>
+          <input type="number" id="sched-implement-val" min="1" value="1">
+          <select id="sched-implement-unit"><option value="60">min</option><option value="3600" selected>hr</option></select>
+          <button class="btn btn-sm" id="sched-implement-btn" onclick="toggleSchedule('implement')">Enable</button>
+        </div>
         <button class="btn btn-primary btn-sm" onclick="launchImpl()" style="width:100%">Run Implement</button>
       </div>
     </div>
     <div class="cmd-group">
-      <button class="btn btn-blue" onclick="toggleCmd('revise')">Revise ▾</button>
+      <button class="btn btn-blue" id="btn-revise" onclick="toggleCmd('revise')">Revise ▾</button>
       <div class="cmd-dropdown" id="cmd-revise">
         <label>Workers</label>
         <input type="number" id="revise-workers" value="3" min="1" max="10">
+        <label>Schedule</label>
+        <div class="sched-row">
+          <span>Every</span>
+          <input type="number" id="sched-revise-val" min="1" value="1">
+          <select id="sched-revise-unit"><option value="60">min</option><option value="3600" selected>hr</option></select>
+          <button class="btn btn-sm" id="sched-revise-btn" onclick="toggleSchedule('revise')">Enable</button>
+        </div>
         <button class="btn btn-blue btn-sm" onclick="launchRevise()" style="width:100%">Run Revise</button>
       </div>
     </div>
@@ -373,6 +400,80 @@ function launchRevise() {
   closeAllCmds(); runJob('revise', args);
 }
 
+let schedules = {};
+
+async function fetchSchedules() {
+  try {
+    const res = await fetch(API + '/api/schedules');
+    schedules = await res.json();
+    for (const cmd of ['triage', 'implement', 'revise']) {
+      const sched = schedules[cmd];
+      const btn = document.getElementById('sched-' + cmd + '-btn');
+      const headerBtn = document.getElementById('btn-' + cmd);
+      if (sched) {
+        const totalSec = sched.interval_seconds;
+        const valEl = document.getElementById('sched-' + cmd + '-val');
+        const unitEl = document.getElementById('sched-' + cmd + '-unit');
+        if (totalSec >= 3600 && totalSec % 3600 === 0) {
+          valEl.value = totalSec / 3600; unitEl.value = '3600';
+        } else {
+          valEl.value = Math.round(totalSec / 60); unitEl.value = '60';
+        }
+        btn.textContent = 'Disable';
+        btn.style.color = 'var(--red)';
+        btn.style.borderColor = 'var(--red)';
+        headerBtn.classList.add('sched-active');
+        if (!headerBtn.querySelector('.sched-dot')) {
+          const dot = document.createElement('span');
+          dot.className = 'sched-dot';
+          headerBtn.appendChild(dot);
+        }
+      } else {
+        btn.textContent = 'Enable';
+        btn.style.color = ''; btn.style.borderColor = '';
+        headerBtn.classList.remove('sched-active');
+        const dot = headerBtn.querySelector('.sched-dot');
+        if (dot) dot.remove();
+      }
+    }
+  } catch(e) {}
+}
+
+function getSchedArgs(cmd) {
+  const args = [];
+  if (cmd === 'triage') {
+    const limit = document.getElementById('triage-limit').value;
+    const workers = document.getElementById('triage-workers').value;
+    if (limit) args.push('--limit', limit);
+    if (workers && workers !== '3') args.push('--workers', workers);
+  } else if (cmd === 'implement') {
+    const workers = document.getElementById('impl-workers').value;
+    if (workers && workers !== '3') args.push('--workers', workers);
+  } else if (cmd === 'revise') {
+    const workers = document.getElementById('revise-workers').value;
+    if (workers && workers !== '3') args.push('--workers', workers);
+  }
+  return args;
+}
+
+async function toggleSchedule(cmd) {
+  const isActive = !!schedules[cmd];
+  if (isActive) {
+    await fetch(API + '/api/schedules/' + cmd, {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ interval_seconds: null }),
+    });
+  } else {
+    const val = parseInt(document.getElementById('sched-' + cmd + '-val').value) || 1;
+    const unit = parseInt(document.getElementById('sched-' + cmd + '-unit').value) || 3600;
+    await fetch(API + '/api/schedules/' + cmd, {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ interval_seconds: val * unit, args: getSchedArgs(cmd) }),
+    });
+  }
+  await fetchSchedules();
+}
+
 async function runJob(command, args) {
   const opts = { method: 'POST' };
   if (args) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify({args}); }
@@ -442,8 +543,10 @@ function shortDate(iso) { if (!iso) return ''; try { return new Date(iso).toLoca
 function timeDiff(a, b) { const s = (new Date(b) - new Date(a)) / 1000; return s < 60 ? s.toFixed(0) + 's' : (s/60).toFixed(1) + 'm'; }
 
 fetchIssues();
+fetchSchedules();
 refreshTimer = setInterval(fetchIssues, 5000);
 setInterval(() => { if (jobsPanelOpen) pollJobs(); }, 5000);
+setInterval(fetchSchedules, 15000);
 </script>
 </body>
 </html>
