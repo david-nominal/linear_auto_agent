@@ -34,6 +34,8 @@
   .badge-approved { background: #1a3a5c; color: var(--blue); }
   .badge-implemented { background: #1a3826; color: var(--green); }
   .badge-pushed { background: #2a1a4e; color: var(--purple); }
+  .badge-completed { background: #1a3826; color: var(--green); }
+  .badge-canceled { background: #3d1416; color: var(--red); }
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
   .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
 
@@ -301,6 +303,8 @@ function renderDetail(t) {
       ${t.triaged_at ? `<span>Triaged: ${shortDate(t.triaged_at)}</span>` : ''}
       ${t.approved_at ? `<span>Approved: ${shortDate(t.approved_at)}</span>` : ''}
       ${t.revision_count ? `<span>Revisions: ${t.revision_count}</span>` : ''}
+      ${t.completed_at ? `<span>Completed: ${shortDate(t.completed_at)}</span>` : ''}
+      ${t.canceled_at ? `<span>Canceled: ${shortDate(t.canceled_at)}</span>` : ''}
       ${prHtml}
       <button class="btn btn-sm" onclick="event.stopPropagation(); openFullscreen('${t.issue_id}')" style="margin-left:auto">Expand</button>
     </div>

@@ -1096,6 +1096,26 @@ def react_to_pr_comments(pr_url: str, database_ids: list[int], issue_id: str = "
     return reacted
 
 
+def fetch_pr_state(pr_url: str) -> str | None:
+    """Return 'merged', 'closed', or 'open' for a GitHub PR. None on error."""
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        return None
+    owner, repo, number = parsed
+    result = subprocess.run(
+        ["gh", "pr", "view", number, "--repo", f"{owner}/{repo}", "--json", "state", "-q", ".state"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    state = result.stdout.strip().upper()
+    if state == "MERGED":
+        return "merged"
+    if state == "CLOSED":
+        return "closed"
+    return "open"
+
+
 def _parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     """Extract (owner, repo, number) from a GitHub PR URL."""
     match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
@@ -1973,6 +1993,34 @@ def _revise_issue(tracking: dict, max_revisions: int = DEFAULT_MAX_REVIEW_REVISI
     return tracking
 
 
+def _check_pr_states(candidates: list[dict]) -> list[dict]:
+    """Check PR states and move merged/closed issues out of 'pushed'. Returns remaining candidates."""
+    remaining = []
+    for t in candidates:
+        prs = t.get("pull_requests", {})
+        pr_urls = [pr.get("url") for pr in prs.values() if pr and pr.get("url")]
+        if not pr_urls:
+            remaining.append(t)
+            continue
+
+        states = [fetch_pr_state(url) for url in pr_urls]
+        issue_id = t["issue_id"]
+
+        if all(s == "merged" for s in states):
+            log(f"{issue_id}: all PRs merged, marking completed", issue=issue_id)
+            t["status"] = "completed"
+            t["completed_at"] = now_iso()
+            save_tracking(issue_id, t)
+        elif any(s == "closed" for s in states):
+            log(f"{issue_id}: PR closed/canceled, marking canceled", issue=issue_id)
+            t["status"] = "canceled"
+            t["canceled_at"] = now_iso()
+            save_tracking(issue_id, t)
+        else:
+            remaining.append(t)
+    return remaining
+
+
 def cmd_revise(args: argparse.Namespace) -> None:
     """Address PR review feedback for pushed issues."""
     tracked = load_all_tracking()
@@ -1981,6 +2029,8 @@ def cmd_revise(args: argparse.Namespace) -> None:
         candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
     else:
         candidates = [t for t in tracked.values() if t["status"] == "pushed"]
+
+    candidates = _check_pr_states(candidates)
 
     max_revisions = getattr(args, "max_revisions", None)
     if max_revisions is not None:
