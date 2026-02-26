@@ -762,6 +762,70 @@ ensure your changes stay consistent with the overall intent.
 - Do NOT push to remote. Do NOT create a PR.
 """
 
+REVIEW_PROMPT = """\
+You are reviewing an implementation for a Linear issue on a git worktree.
+
+## Issue: {id} — {title}
+
+{description}
+
+## Implementation plan that was followed
+
+{plan}
+
+## Instructions
+
+1. Run `git diff origin/{default_branch}...HEAD` to see all changes made.
+2. Read through the diff and the surrounding code carefully, then evaluate:
+
+   a) **Does the implementation address the issue?** Check that the requirements from the issue \
+description are actually fulfilled by the changes, not just partially or superficially.
+
+   b) **Code duplication / missed reuse**: Are there places where an existing API, class, utility, \
+or component should have been modified or extended instead of adding new code? Look for patterns \
+that already exist in the codebase that the new code is duplicating.
+
+   c) **Simplification opportunities**: Now that the new code exists, could existing code elsewhere \
+be updated or simplified to use it? For example, old callers that could use a new abstraction, or \
+redundant logic that can now be consolidated.
+
+   d) **Code quality** Is the code in line with the conventions in the AGENTS.md file and the surrounding code?
+   If it's an FE change is the UX design in line with the existing design and user-friendly?
+
+3. Output your verdict:
+   - If everything looks good, output exactly: LGTM
+   - If there are issues, output a numbered list of **specific, actionable corrections**. \
+Each item must reference a concrete file and describe exactly what should change. \
+Do NOT list vague suggestions — only real problems worth fixing.
+"""
+
+REVIEW_REVISE_PROMPT = """\
+You are addressing self-review feedback on a git worktree.
+
+## Issue: {id} — {title}
+
+{description}
+
+## Implementation plan
+
+{plan}
+
+## Review feedback to address
+
+{feedback}
+
+## Instructions
+
+- Address each item in the review feedback above.
+- Keep the original issue description and implementation plan in mind — \
+ensure your changes stay consistent with the overall intent.
+- Run compilation and tests after making changes.
+- Commit your changes with message "fix: address review feedback for {id}"
+- Do NOT push to remote. Do NOT create a PR.
+"""
+
+DEFAULT_MAX_REVIEW_REVISIONS = 5
+
 
 def resolve_pr_threads(thread_ids: list[str], issue_id: str = "") -> int:
     """Resolve review threads by ID via GitHub GraphQL. Returns count of resolved threads."""
@@ -1041,7 +1105,87 @@ def cmd_approve(args: argparse.Namespace) -> None:
         log("Approved", issue=issue_id)
 
 
-def _implement_issue(tracking: dict) -> dict:
+def _self_review_repo(tracking: dict, repo_key: str) -> str | None:
+    """Run a read-only self-review on a repo's implementation.
+
+    Returns feedback string if corrections are needed, None if LGTM.
+    """
+    issue_id = tracking["issue_id"]
+    impl = tracking.get("implementations", {}).get(repo_key, {})
+    worktree_path = impl.get("worktree_path")
+    if not worktree_path or not Path(worktree_path).is_dir():
+        return None
+
+    default_branch = _get_default_branch(worktree_path)
+
+    prompt = REVIEW_PROMPT.format(
+        id=issue_id, title=tracking["title"],
+        description=tracking.get("description", ""),
+        plan=tracking.get("plan", "No plan available"),
+        default_branch=default_branch,
+    )
+
+    model = os.environ.get("IMPL_MODEL") or None
+    log_name = f"{issue_id}-{repo_key}-review"
+    log(f"{repo_key}: running self-review...", issue=issue_id)
+    exit_code, output = run_cursor_agent(
+        prompt, mode="ask", workspace=worktree_path,
+        log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
+    )
+
+    if exit_code != 0:
+        log(f"{repo_key}: review agent failed (exit={exit_code}), skipping", issue=issue_id)
+        return None
+
+    if re.search(r"\bLGTM\b", output):
+        log(f"{repo_key}: review passed (LGTM)", issue=issue_id)
+        return None
+
+    feedback = output.strip()
+    log(f"{repo_key}: review found issues", issue=issue_id)
+    return feedback
+
+
+def _review_revise_loop(tracking: dict, repo_key: str, max_revisions: int) -> int:
+    """Run review→revise loop for a repo. Returns number of revisions made."""
+    issue_id = tracking["issue_id"]
+    impl = tracking.get("implementations", {}).get(repo_key, {})
+    worktree_path = impl.get("worktree_path")
+    if not worktree_path:
+        return 0
+
+    rev_count = 0
+    while rev_count < max_revisions:
+        feedback = _self_review_repo(tracking, repo_key)
+        if not feedback:
+            break
+
+        rev_count += 1
+        log(f"{repo_key}: self-review revision {rev_count}/{max_revisions}...", issue=issue_id)
+
+        prompt = REVIEW_REVISE_PROMPT.format(
+            id=issue_id, title=tracking["title"],
+            description=tracking.get("description", ""),
+            plan=tracking.get("plan", "No plan available"),
+            feedback=feedback,
+        )
+
+        model = os.environ.get("IMPL_MODEL") or None
+        log_name = f"{issue_id}-{repo_key}-review-revise-{rev_count}"
+        exit_code, _output = run_cursor_agent(
+            prompt, workspace=worktree_path, yolo=True, sandbox=True,
+            log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
+        )
+
+        if exit_code != 0:
+            log(f"{repo_key}: review-revise failed (exit={exit_code}), stopping loop", issue=issue_id)
+            break
+
+    tracking["revision_count"] = tracking.get("revision_count", 0) + rev_count
+    return rev_count
+
+
+def _implement_issue(tracking: dict, max_revisions: int = DEFAULT_MAX_REVIEW_REVISIONS) -> dict:
     """Implement all repos for a single issue. Returns updated tracking dict."""
     issue_id = tracking["issue_id"]
     repos = tracking.get("repos", ["backend"])
@@ -1071,6 +1215,8 @@ def _implement_issue(tracking: dict) -> dict:
             log(f"{repo_key}: done", issue=issue_id)
             if repo_key == "backend":
                 be_worktree_path = impl.get("worktree_path")
+
+            _review_revise_loop(tracking, repo_key, max_revisions)
 
         if impl.get("output_log"):
             log(f"  Log: {impl['output_log']}", issue=issue_id)
@@ -1102,8 +1248,10 @@ def cmd_implement(args: argparse.Namespace) -> None:
     done = 0
     succeeded = 0
 
+    max_revisions = getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_implement_issue, t): t for t in approved}
+        futures = {pool.submit(_implement_issue, t, max_revisions): t for t in approved}
         for future in as_completed(futures):
             orig = futures[future]
             try:
@@ -1449,11 +1597,12 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict
     }
 
 
-def _revise_issue(tracking: dict) -> dict:
+def _revise_issue(tracking: dict, max_revisions: int = DEFAULT_MAX_REVIEW_REVISIONS) -> dict:
     """Check for unresolved PR comments and run agents to address them.
 
     Processes backend first so that if BE changes occur, the updated APIs
     can be linked into the frontend worktree before the FE agent runs.
+    After each successful PR revision, runs the self-review loop.
     """
     issue_id = tracking["issue_id"]
     prs = tracking.get("pull_requests", {})
@@ -1493,6 +1642,10 @@ def _revise_issue(tracking: dict) -> dict:
             if repo_key == "backend":
                 be_revised = True
 
+            remaining = max_revisions - tracking.get("revision_count", 0)
+            if remaining > 0:
+                _review_revise_loop(tracking, repo_key, remaining)
+
     tracking["revisions"] = revisions
     if revisions_before != len(revisions):
         tracking["revision_count"] = tracking.get("revision_count", 0) + 1
@@ -1526,8 +1679,10 @@ def cmd_revise(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
     done = 0
 
+    review_max = max_revisions if max_revisions is not None else DEFAULT_MAX_REVIEW_REVISIONS
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_revise_issue, t): t for t in candidates}
+        futures = {pool.submit(_revise_issue, t, review_max): t for t in candidates}
         for future in as_completed(futures):
             orig = futures[future]
             try:
@@ -1581,11 +1736,15 @@ def main():
 
     p_implement = sub.add_parser("implement", help="Implement approved issues")
     p_implement.add_argument("issue_ids", nargs="*", help="Issue identifiers to implement (default: all approved)")
+    p_implement.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
+                             help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_implement)
     p_implement.set_defaults(func=cmd_implement)
 
     p_run = sub.add_parser("run", help="Full cycle: triage then implement approved")
     p_run.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_run.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
+                       help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
