@@ -28,6 +28,17 @@ WORKTREES_DIR = DATA_DIR / "worktrees"
 LOGS_DIR = DATA_DIR / "logs"
 WORKSPACE_DIR = DATA_DIR / "workspace"
 
+_repo_locks: dict[str, threading.Lock] = {}
+_repo_locks_guard = threading.Lock()
+
+
+def _get_repo_lock(repo_key: str) -> threading.Lock:
+    """Return a per-repo lock, creating one lazily if needed."""
+    with _repo_locks_guard:
+        if repo_key not in _repo_locks:
+            _repo_locks[repo_key] = threading.Lock()
+        return _repo_locks[repo_key]
+
 REPOS = {
     "backend": {"dir": "scout", "clone_url": "git@github.com:nominal-io/scout.git", "description": "Java + Python backend"},
     "frontend": {"dir": "galaxy", "clone_url": "git@github.com:nominal-io/galaxy.git", "description": "TypeScript frontend + tRPC backend, nominal-mcp, and multiplayer servers"},
@@ -977,23 +988,24 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
     default_branch = _get_default_branch(repo_path)
     remote_ref = f"origin/{default_branch}"
 
-    log(f"Fetching latest {remote_ref}...", issue=issue_id)
-    subprocess.run(["git", "-C", repo_path, "fetch", "origin", default_branch],
-                   capture_output=True, text=True)
+    with _get_repo_lock(repo_key):
+        log(f"Fetching latest {remote_ref}...", issue=issue_id)
+        subprocess.run(["git", "-C", repo_path, "fetch", "origin", default_branch],
+                       capture_output=True, text=True)
 
-    wt_cmd = ["git", "-C", repo_path, "worktree", "add", worktree_path, "-b", branch_name, remote_ref]
-    wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
-    if wt_result.returncode != 0:
-        if "already exists" in wt_result.stderr:
-            log(f"Worktree/branch {branch_name} already exists, reusing", issue=issue_id)
-        else:
-            return {
-                "repo": repo_key,
-                "error": f"Failed to create worktree: {wt_result.stderr}",
-                "exit_code": -1,
-                "started_at": now_iso(),
-                "completed_at": now_iso(),
-            }
+        wt_cmd = ["git", "-C", repo_path, "worktree", "add", worktree_path, "-b", branch_name, remote_ref]
+        wt_result = subprocess.run(wt_cmd, capture_output=True, text=True)
+        if wt_result.returncode != 0:
+            if "already exists" in wt_result.stderr:
+                log(f"Worktree/branch {branch_name} already exists, reusing", issue=issue_id)
+            else:
+                return {
+                    "repo": repo_key,
+                    "error": f"Failed to create worktree: {wt_result.stderr}",
+                    "exit_code": -1,
+                    "started_at": now_iso(),
+                    "completed_at": now_iso(),
+                }
 
     be_linked = False
     repos_affected = tracking.get("repos", [])
@@ -1512,10 +1524,18 @@ def cmd_triage(args: argparse.Namespace) -> None:
             log(f"New comment found after clarification — re-triaging", issue=t["issue_id"])
             clarification_retriage.append(issue)
 
+    limit = getattr(args, "limit", None)
+    if limit:
+        active_count = sum(1 for t in tracked.values() if t["status"] in ACTIVE_PIPELINE_STATUSES)
+        remaining = limit - active_count
+        if remaining <= 0:
+            log(f"WIP limit reached ({active_count}/{limit} active) — skipping new issues")
+            untracked = []
+        else:
+            untracked = untracked[:remaining]
+            log(f"WIP limit: {active_count}/{limit} active, triaging up to {remaining} new issue(s)")
+
     to_triage = clarification_retriage + untracked
-    if args.limit:
-        to_triage = to_triage[:args.limit]
-        log(f"Limited to {args.limit} issues")
 
     if not to_triage:
         log("No new issues to triage.")
@@ -1564,7 +1584,7 @@ def cmd_status(_args: argparse.Namespace) -> None:
         "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
         "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
         "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
-        "completed": 11, "canceled": 12, "archived": 13,
+        "completed": 11, "canceled": 12, "archived": 13, "denied": 14,
     }
     sorted_items = sorted(tracked.values(), key=lambda t: status_order.get(t["status"], 99))
 
@@ -1593,6 +1613,7 @@ def cmd_status(_args: argparse.Namespace) -> None:
 
 
 def cmd_approve(args: argparse.Namespace) -> None:
+    deny = getattr(args, "deny", False)
     for issue_id in args.issue_ids:
         tracking = load_tracking(issue_id)
         if not tracking:
@@ -1601,10 +1622,16 @@ def cmd_approve(args: argparse.Namespace) -> None:
         if tracking["status"] != "awaiting_approval":
             log(f"Status is '{tracking['status']}', expected 'awaiting_approval'", issue=issue_id)
             continue
-        tracking["status"] = "approved"
-        tracking["approved_at"] = now_iso()
-        save_tracking(issue_id, tracking)
-        log("Approved", issue=issue_id)
+        if deny:
+            tracking["status"] = "denied"
+            tracking["denied_at"] = now_iso()
+            save_tracking(issue_id, tracking)
+            log("Denied", issue=issue_id)
+        else:
+            tracking["status"] = "approved"
+            tracking["approved_at"] = now_iso()
+            save_tracking(issue_id, tracking)
+            log("Approved", issue=issue_id)
 
 
 def _self_review_repo(tracking: dict, repo_key: str, rev_num: int = 0) -> str | None:
@@ -1753,11 +1780,6 @@ def cmd_implement(args: argparse.Namespace) -> None:
         approved = [t for t in tracked.values() if t["issue_id"] in issue_ids and t["status"] == "approved"]
     else:
         approved = [t for t in tracked.values() if t["status"] == "approved"]
-
-    limit = getattr(args, "limit", None)
-    if limit:
-        approved = approved[:limit]
-        log(f"Limited to {limit} issues")
 
     if not approved:
         log("No approved issues to implement. Run 'approve <issue-id>' first.")
@@ -2311,11 +2333,6 @@ def cmd_revise(args: argparse.Namespace) -> None:
         if skipped:
             log(f"Skipped {skipped} issue(s) already at {max_revisions}+ revisions")
 
-    limit = getattr(args, "limit", None)
-    if limit:
-        candidates = candidates[:limit]
-        log(f"Limited to {limit} issues")
-
     if not candidates:
         log("No pushed issues with PRs to revise.")
         return
@@ -2458,11 +2475,6 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
 
     candidates = _check_pr_states(candidates)
 
-    limit = getattr(args, "limit", None)
-    if limit:
-        candidates = candidates[:limit]
-        log(f"Limited to {limit} issues")
-
     if not candidates:
         log("No pushed issues to check for readiness.")
         return
@@ -2498,7 +2510,8 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
     log(f"Notified {notified} issue(s) as ready for review.")
 
 
-TERMINAL_STATUSES = {"completed", "canceled", "archived"}
+ACTIVE_PIPELINE_STATUSES = {"awaiting_approval", "approved", "implemented", "pushed"}
+TERMINAL_STATUSES = {"completed", "canceled", "archived", "denied"}
 NON_ACTIONABLE_STATE_TYPES = {"completed", "canceled"}
 
 
@@ -2569,14 +2582,13 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     revise_args = argparse.Namespace(
         issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
         workers=getattr(args, "workers", DEFAULT_WORKERS),
-        limit=getattr(args, "limit", None),
     )
     cmd_revise(revise_args)
 
     log("=" * 60)
     log("SWEEP: Stage 5/5 — Notify Ready")
     log("=" * 60)
-    notify_args = argparse.Namespace(issue_ids=[], limit=getattr(args, "limit", None))
+    notify_args = argparse.Namespace(issue_ids=[])
     cmd_notify_ready(notify_args)
 
     log("=" * 60)
@@ -2608,7 +2620,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_triage = sub.add_parser("triage", help="Fetch and triage open Linear issues")
-    p_triage.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_triage.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_triage.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     _add_workers_arg(p_triage)
     p_triage.set_defaults(func=cmd_triage)
@@ -2616,8 +2628,9 @@ def main():
     p_status = sub.add_parser("status", help="Show status of all tracked issues")
     p_status.set_defaults(func=cmd_status)
 
-    p_approve = sub.add_parser("approve", help="Approve issues for implementation")
-    p_approve.add_argument("issue_ids", nargs="+", help="Issue identifiers to approve")
+    p_approve = sub.add_parser("approve", help="Approve or deny issues for implementation")
+    p_approve.add_argument("issue_ids", nargs="+", help="Issue identifiers to approve/deny")
+    p_approve.add_argument("--deny", action="store_true", help="Deny instead of approve")
     p_approve.set_defaults(func=cmd_approve)
 
     p_ask = sub.add_parser("ask_clarification", help="Post clarification comment on Linear")
@@ -2626,14 +2639,13 @@ def main():
 
     p_implement = sub.add_parser("implement", help="Implement approved issues")
     p_implement.add_argument("issue_ids", nargs="*", help="Issue identifiers to implement (default: all approved)")
-    p_implement.add_argument("--limit", type=int, default=None, help="Max issues to implement")
     p_implement.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                              help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_implement)
     p_implement.set_defaults(func=cmd_implement)
 
     p_run = sub.add_parser("run", help="Full cycle: triage then implement approved")
-    p_run.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_run.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_run.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_run.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                        help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
@@ -2649,7 +2661,6 @@ def main():
 
     p_revise = sub.add_parser("revise", help="Address PR review feedback for pushed issues")
     p_revise.add_argument("issue_ids", nargs="*", help="Issue identifiers to revise (default: all pushed)")
-    p_revise.add_argument("--limit", type=int, default=None, help="Max issues to revise")
     p_revise.add_argument("--max-revisions", type=int, default=None,
                           help="Skip issues that already have this many revisions")
     _add_workers_arg(p_revise)
@@ -2664,7 +2675,7 @@ def main():
     p_sync.set_defaults(func=cmd_sync)
 
     p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → revise → notify_ready")
-    p_sweep.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_sweep.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_sweep.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                          help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")

@@ -44,6 +44,7 @@
   .badge-pushed { background: #2a1a4e; color: var(--purple); }
   .badge-completed { background: #1a3826; color: var(--green); }
   .badge-canceled { background: #3d1416; color: var(--red); }
+  .badge-denied { background: #3d1416; color: var(--red); }
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
   .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
   .badge-asked_clarification { background: #3d2e00; color: var(--yellow); }
@@ -132,7 +133,7 @@
     <div class="cmd-group">
       <button class="btn btn-yellow" id="btn-triage" onclick="toggleCmd('triage')" data-tip="Fetch new Linear issues and classify them by complexity">Triage ▾</button>
       <div class="cmd-dropdown" id="cmd-triage">
-        <label>Limit (max issues)</label>
+        <label>Limit (max active tasks)</label>
         <input type="number" id="triage-limit" placeholder="all" min="1">
         <label>Max age (days)</label>
         <input type="number" id="triage-max-age" value="30" min="1">
@@ -151,8 +152,6 @@
     <div class="cmd-group">
       <button class="btn btn-primary" id="btn-implement" onclick="toggleCmd('implement')" data-tip="Run the coding agent on approved issues">Implement ▾</button>
       <div class="cmd-dropdown" id="cmd-implement">
-        <label>Limit (max issues)</label>
-        <input type="number" id="impl-limit" placeholder="all" min="1">
         <label>Workers</label>
         <input type="number" id="impl-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -168,8 +167,6 @@
     <div class="cmd-group">
       <button class="btn btn-blue" id="btn-revise" onclick="toggleCmd('revise')" data-tip="Address PR review feedback on pushed issues">Revise ▾</button>
       <div class="cmd-dropdown" id="cmd-revise">
-        <label>Limit (max issues)</label>
-        <input type="number" id="revise-limit" placeholder="all" min="1">
         <label>Workers</label>
         <input type="number" id="revise-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -185,7 +182,7 @@
     <div class="cmd-group">
       <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)" data-tip="Full pipeline: sync → triage → implement → revise → notify">Sweep ▾</button>
       <div class="cmd-dropdown" id="cmd-sweep">
-        <label>Limit (max triage)</label>
+        <label>Limit (max active tasks)</label>
         <input type="number" id="sweep-limit" placeholder="all" min="1">
         <label>Max age (days)</label>
         <input type="number" id="sweep-max-age" value="30" min="1">
@@ -310,7 +307,7 @@ function render() {
       <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
       <td class="actions-cell">${runningIssues.has(t.issue_id)
         ? '<span class="spinner"></span> <span style="font-size:12px;color:var(--text2)">running</span>'
-        : `        ${t.status === 'awaiting_approval' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); approve('${t.issue_id}')" data-tip="Approve the plan and allow implementation">Approve</button>` : ''}
+        : `        ${t.status === 'awaiting_approval' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); approve('${t.issue_id}')" data-tip="Approve the plan and allow implementation">Approve</button><button class="btn btn-sm" style="border-color:var(--red);color:var(--red);margin-left:4px" onclick="event.stopPropagation(); deny('${t.issue_id}')" data-tip="Deny this issue">Deny</button>` : ''}
         ${t.status === 'approved' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('implement','${t.issue_id}')" data-tip="Run the coding agent to implement this issue">Implement</button>` : ''}
         ${t.status === 'pushed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('revise','${t.issue_id}')" data-tip="Address PR review feedback">Revise</button>` : ''}
         ${t.status === 'implemented' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('push','${t.issue_id}')" data-tip="Push branch and create a PR">Push</button>` : ''}
@@ -365,6 +362,7 @@ function renderDetail(t) {
       ${(t.labels||[]).length ? `<span>Labels: ${t.labels.join(', ')}</span>` : ''}
       ${t.triaged_at ? `<span>Triaged: ${shortDate(t.triaged_at)}</span>` : ''}
       ${t.approved_at ? `<span>Approved: ${shortDate(t.approved_at)}</span>` : ''}
+      ${t.denied_at ? `<span style="color:var(--red)">Denied: ${shortDate(t.denied_at)}</span>` : ''}
       ${t.revision_count ? `<span>Revisions: ${t.revision_count}</span>` : ''}
       ${t.completed_at ? `<span>Completed: ${shortDate(t.completed_at)}</span>` : ''}
       ${t.canceled_at ? `<span>Canceled: ${shortDate(t.canceled_at)}</span>` : ''}
@@ -448,6 +446,12 @@ async function approve(issueId) {
   await fetchIssues();
 }
 
+async function deny(issueId) {
+  if (!confirm('Deny ' + issueId + '?')) return;
+  await fetch(API + '/api/issues/' + issueId + '/deny', { method: 'POST' });
+  await fetchIssues();
+}
+
 async function savePlan(issueId) {
   const plan = document.getElementById('plan-' + issueId)?.value;
   const planSummary = document.getElementById('plansum-' + issueId)?.value;
@@ -486,17 +490,13 @@ function launchTriage() {
 }
 function launchImpl() {
   const args = [];
-  const limit = document.getElementById('impl-limit').value;
   const workers = document.getElementById('impl-workers').value;
-  if (limit) args.push('--limit', limit);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('implement', args);
 }
 function launchRevise() {
   const args = [];
-  const limit = document.getElementById('revise-limit').value;
   const workers = document.getElementById('revise-workers').value;
-  if (limit) args.push('--limit', limit);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('revise', args);
 }
@@ -560,14 +560,10 @@ function getSchedArgs(cmd) {
     if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'implement') {
-    const limit = document.getElementById('impl-limit').value;
     const workers = document.getElementById('impl-workers').value;
-    if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'revise') {
-    const limit = document.getElementById('revise-limit').value;
     const workers = document.getElementById('revise-workers').value;
-    if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'sweep') {
     const limit = document.getElementById('sweep-limit').value;

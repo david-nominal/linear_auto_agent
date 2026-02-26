@@ -26,7 +26,7 @@ STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
     "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
     "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
-    "completed": 11, "canceled": 12, "archived": 13,
+    "completed": 11, "canceled": 12, "archived": 13, "denied": 14,
 }
 
 # Job tracking (in-memory for current session)
@@ -310,6 +310,22 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             tracking["status"] = "approved"
             tracking["approved_at"] = datetime.now(timezone.utc).isoformat()
+            _save_tracking(issue_id, tracking)
+            self._json_response({"ok": True, "issue_id": issue_id})
+            return
+
+        if path.startswith("/api/issues/") and path.endswith("/deny"):
+            parts = path.split("/")
+            issue_id = parts[3]
+            tracking = _load_tracking(issue_id)
+            if not tracking:
+                self._json_response({"error": "not found"}, 404)
+                return
+            if tracking["status"] != "awaiting_approval":
+                self._json_response({"error": f"status is '{tracking['status']}', expected 'awaiting_approval'"}, 400)
+                return
+            tracking["status"] = "denied"
+            tracking["denied_at"] = datetime.now(timezone.utc).isoformat()
             _save_tracking(issue_id, tracking)
             self._json_response({"ok": True, "issue_id": issue_id})
             return
