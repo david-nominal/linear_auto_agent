@@ -417,6 +417,61 @@ def _format_linear_comments(data: dict) -> str:
     return "\n\n".join(parts)
 
 
+def post_linear_comment(issue_id: str, body: str) -> bool:
+    """Post a comment on a Linear issue. Returns True on success."""
+    match = re.match(r"^([A-Za-z]+)-(\d+)$", issue_id)
+    if not match:
+        log(f"Cannot parse identifier for comment post", issue=issue_id, file=sys.stderr)
+        return False
+    team_key = match.group(1).upper()
+    number = int(match.group(2))
+
+    headers = {"Authorization": linear_api_key(), "Content-Type": "application/json"}
+
+    # Resolve identifier to internal UUID
+    id_query = """
+    query($teamKey: String!, $number: Float!) {
+        issues(filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }, first: 1) {
+            nodes { id }
+        }
+    }
+    """
+    resp = requests.post(
+        LINEAR_API_URL,
+        json={"query": id_query, "variables": {"teamKey": team_key, "number": number}},
+        headers=headers, timeout=30,
+    )
+    if resp.status_code != 200:
+        log(f"Failed to resolve issue UUID (HTTP {resp.status_code})", issue=issue_id, file=sys.stderr)
+        return False
+    nodes = resp.json().get("data", {}).get("issues", {}).get("nodes", [])
+    if not nodes:
+        log(f"Issue not found in Linear", issue=issue_id, file=sys.stderr)
+        return False
+    internal_id = nodes[0]["id"]
+
+    # Post comment
+    mutation = """
+    mutation($issueId: String!, $body: String!) {
+        commentCreate(input: { issueId: $issueId, body: $body }) {
+            success
+        }
+    }
+    """
+    resp = requests.post(
+        LINEAR_API_URL,
+        json={"query": mutation, "variables": {"issueId": internal_id, "body": body}},
+        headers=headers, timeout=30,
+    )
+    if resp.status_code != 200:
+        log(f"Failed to post comment (HTTP {resp.status_code})", issue=issue_id, file=sys.stderr)
+        return False
+    success = resp.json().get("data", {}).get("commentCreate", {}).get("success", False)
+    if not success:
+        log(f"commentCreate returned success=false", issue=issue_id, file=sys.stderr)
+    return success
+
+
 # ---------------------------------------------------------------------------
 # Tracking
 # ---------------------------------------------------------------------------
@@ -1349,15 +1404,37 @@ def cmd_triage(args: argparse.Namespace) -> None:
     untracked = [i for i in issues if i["id"] not in tracked]
     log(f"{len(untracked)} untracked issues")
 
+    # Re-triage asked_clarification issues that received a new comment
+    issues_by_id = {i["id"]: i for i in issues}
+    clarification_retriage: list[dict] = []
+    for t in tracked.values():
+        if t["status"] != "asked_clarification":
+            continue
+        asked_at = t.get("clarification_asked_at", "")
+        if not asked_at:
+            continue
+        issue = issues_by_id.get(t["issue_id"])
+        if not issue:
+            continue
+        comment_data = fetch_issue_comments(t["issue_id"])
+        has_new = any(
+            c.get("created_at", "") > asked_at
+            for c in comment_data.get("comments", [])
+        )
+        if has_new:
+            log(f"New comment found after clarification — re-triaging", issue=t["issue_id"])
+            clarification_retriage.append(issue)
+
+    to_triage = untracked + clarification_retriage
     if args.limit:
-        untracked = untracked[:args.limit]
+        to_triage = to_triage[:args.limit]
         log(f"Limited to {args.limit} issues")
 
-    if not untracked:
+    if not to_triage:
         log("No new issues to triage.")
         return
 
-    total = len(untracked)
+    total = len(to_triage)
     workers = getattr(args, "workers", DEFAULT_WORKERS)
     log(f"Triaging {total} issue(s) with {workers} worker(s)...")
     t0 = time.monotonic()
@@ -1366,7 +1443,7 @@ def cmd_triage(args: argparse.Namespace) -> None:
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_triage_and_plan_issue, issue, workspace): issue
-                   for issue in untracked}
+                   for issue in to_triage}
         for future in as_completed(futures):
             issue = futures[future]
             try:
@@ -1395,7 +1472,7 @@ def cmd_status(_args: argparse.Namespace) -> None:
     status_order = {
         "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
         "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
-        "needs_clarification": 8, "complex_skip": 9,
+        "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
     }
     sorted_items = sorted(tracked.values(), key=lambda t: status_order.get(t["status"], 99))
 
@@ -1692,6 +1769,39 @@ def cmd_retry(args: argparse.Namespace) -> None:
                     log(f"Re-implementation failed: {exc}", issue=orig["issue_id"], file=sys.stderr)
 
 
+def cmd_ask_clarification(args: argparse.Namespace) -> None:
+    """Post a clarification comment on Linear and update status."""
+    issue_id = args.issue_ids[0]
+    tracking = load_tracking(issue_id)
+    if not tracking:
+        log(f"Not found in tracking", issue=issue_id)
+        return
+    if tracking["status"] != "needs_clarification":
+        log(f"Status is '{tracking['status']}', expected 'needs_clarification'", issue=issue_id)
+        return
+
+    reasoning = tracking.get("reasoning", "")
+    if not reasoning:
+        log("No reasoning available to post", issue=issue_id)
+        return
+
+    comment_body = (
+        "**🏐 Spiky needs clarification for auto-implementation:**\n\n"
+        f"{reasoning}\n\n"
+        "_Please reply with the requested details so we can proceed._"
+    )
+
+    log(f"Posting clarification comment...", issue=issue_id)
+    if not post_linear_comment(issue_id, comment_body):
+        log("Failed to post comment", issue=issue_id, file=sys.stderr)
+        return
+
+    tracking["status"] = "asked_clarification"
+    tracking["clarification_asked_at"] = now_iso()
+    save_tracking(issue_id, tracking)
+    log("Clarification comment posted — awaiting reply", issue=issue_id)
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     cmd_triage(args)
     log("=" * 60)
@@ -1793,7 +1903,7 @@ def _make_pr_body(tracking: dict, repo_key: str, *, link_issue: bool = False) ->
     if link_issue and issue_url:
         lines.append(f"Fixes: {issue_url}")
     lines.append("")
-    lines.append(f"Auto-generated by linear-auto-agent from {tracking['issue_id']}.")
+    lines.append(f"🏐 Auto-generated by Spiky from {tracking['issue_id']}.")
     lines.append("")
 
     summary = tracking.get("plan_summary", "")
@@ -2125,6 +2235,10 @@ def main():
     p_approve = sub.add_parser("approve", help="Approve issues for implementation")
     p_approve.add_argument("issue_ids", nargs="+", help="Issue identifiers to approve")
     p_approve.set_defaults(func=cmd_approve)
+
+    p_ask = sub.add_parser("ask_clarification", help="Post clarification comment on Linear")
+    p_ask.add_argument("issue_ids", nargs=1, help="Issue identifier")
+    p_ask.set_defaults(func=cmd_ask_clarification)
 
     p_implement = sub.add_parser("implement", help="Implement approved issues")
     p_implement.add_argument("issue_ids", nargs="*", help="Issue identifiers to implement (default: all approved)")

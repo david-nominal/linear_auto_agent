@@ -38,6 +38,7 @@
   .badge-canceled { background: #3d1416; color: var(--red); }
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
   .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
+  .badge-asked_clarification { background: #3d2e00; color: var(--yellow); }
 
   /* Table */
   table { width: 100%; border-collapse: collapse; }
@@ -60,7 +61,7 @@
   .detail-section pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; color: var(--text); }
   .detail-section textarea { width: 100%; min-height: 200px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 13px; color: var(--text); font-family: monospace; resize: vertical; }
   .detail-meta { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; color: var(--text2); }
-  .detail-meta a { color: var(--accent); text-decoration: none; }
+  .detail-meta a { color: var(--accent); text-decoration: none; white-space: nowrap; }
   .detail-meta a:hover { text-decoration: underline; }
   .detail-actions { display: flex; gap: 8px; margin-top: 12px; }
   .impl-table { width: 100%; font-size: 13px; margin-top: 4px; }
@@ -74,8 +75,12 @@
   .jobs-panel-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
   .jobs-panel-header h2 { font-size: 14px; }
   .job-card { padding: 12px 16px; border-bottom: 1px solid var(--border); }
-  .job-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 13px; }
-  .job-card pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: var(--text2); }
+  .job-card-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+  .job-card pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--text2); margin-top: 6px; }
+  .job-log-wrap { position: relative; }
+  .job-log-wrap.collapsed pre { display: none; }
+  .job-log-toggle { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 12px; padding: 2px 0; }
+  .job-log-toggle:hover { color: var(--text); }
   .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -183,20 +188,20 @@
   <div class="empty" id="emptyState">Loading...</div>
 </div>
 
-<div class="fullscreen-overlay" id="fullscreenOverlay">
-  <div class="fullscreen-header">
-    <h2 id="fullscreenTitle"></h2>
-    <button class="btn btn-sm" onclick="closeFullscreen()">Close (Esc)</button>
-  </div>
-  <div class="fullscreen-body" id="fullscreenBody"></div>
-</div>
-
 <div class="jobs-panel" id="jobsPanel">
   <div class="jobs-panel-header">
     <h2>Jobs</h2>
     <button class="btn btn-sm" onclick="toggleJobs()">Close</button>
   </div>
   <div id="jobsList"></div>
+</div>
+
+<div class="fullscreen-overlay" id="fullscreenOverlay">
+  <div class="fullscreen-header">
+    <h2 id="fullscreenTitle"></h2>
+    <button class="btn btn-sm" onclick="closeFullscreen()">Close (Esc)</button>
+  </div>
+  <div class="fullscreen-body" id="fullscreenBody"></div>
 </div>
 
 <script>
@@ -207,6 +212,7 @@ let jobsPanelOpen = false;
 let refreshTimer = null;
 let jobsTimer = null;
 let runningIssues = new Set();
+let expandedJobs = new Set();
 
 async function fetchIssues() {
   try {
@@ -259,7 +265,8 @@ function render() {
         ${t.status === 'approved' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('implement','${t.issue_id}')">Implement</button>` : ''}
         ${t.status === 'pushed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('revise','${t.issue_id}')">Revise</button>` : ''}
         ${t.status === 'implemented' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('push','${t.issue_id}')">Push</button>` : ''}
-        ${t.status === 'failed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('retry','${t.issue_id}')">Retry</button>` : ''}`}
+        ${t.status === 'failed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('retry','${t.issue_id}')">Retry</button>` : ''}
+        ${t.status === 'needs_clarification' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('ask_clarification','${t.issue_id}')">Ask Clarification</button>` : ''}`}
       </td>
     </tr>`;
 
@@ -306,7 +313,11 @@ function renderDetail(t) {
       ${t.completed_at ? `<span>Completed: ${shortDate(t.completed_at)}</span>` : ''}
       ${t.canceled_at ? `<span>Canceled: ${shortDate(t.canceled_at)}</span>` : ''}
       ${prHtml}
-      <button class="btn btn-sm" onclick="event.stopPropagation(); openFullscreen('${t.issue_id}')" style="margin-left:auto">Expand</button>
+      <span id="log-links-${t.issue_id}" style="display:contents"></span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="event.stopPropagation(); openFullscreen('${t.issue_id}')">Expand</button>
+        <button class="btn btn-sm" onclick="event.stopPropagation(); toggleDetail('${t.issue_id}')">Collapse</button>
+      </span>
     </div>
     ${t.description ? `<div class="detail-section"><h3>Description</h3><pre>${esc(t.description)}</pre></div>` : ''}
     ${t.reasoning ? `<div class="detail-section" style="margin-top:12px"><h3>Reasoning</h3><pre>${esc(t.reasoning)}</pre></div>` : ''}
@@ -332,7 +343,28 @@ function renderDetail(t) {
   </div>`;
 }
 
-function toggleDetail(id) { expandedId = expandedId === id ? null : id; render(); }
+function toggleDetail(id) {
+  expandedId = expandedId === id ? null : id;
+  render();
+  if (expandedId) fetchLogLinks(expandedId);
+}
+
+async function fetchLogLinks(issueId) {
+  try {
+    const res = await fetch(API + '/api/logs/' + encodeURIComponent(issueId) + '/');
+    if (!res.ok) return;
+    const files = await res.json();
+    const el = document.getElementById('log-links-' + issueId);
+    if (!el || !files.length) return;
+    const labels = { 'triage': 'triage', 'plan': 'plan' };
+    const links = files.map(f => {
+      const name = f.replace(/\.log$/, '');
+      const href = `/api/logs/${encodeURIComponent(issueId)}/${encodeURIComponent(f)}`;
+      return `<a href="${href}" target="_blank" style="font-size:12px">${esc(name)}</a>`;
+    });
+    el.innerHTML = 'Logs: ' + links.join(' · ');
+  } catch(e) {}
+}
 
 let fullscreenId = null;
 function openFullscreen(id) {
@@ -343,6 +375,7 @@ function openFullscreen(id) {
   document.getElementById('fullscreenBody').innerHTML = renderDetail(t);
   document.getElementById('fullscreenOverlay').classList.add('open');
   pauseRefresh();
+  fetchLogLinks(id);
 }
 function closeFullscreen() {
   fullscreenId = null;
@@ -496,6 +529,13 @@ async function killJob(jobId) {
   pollJobs();
 }
 
+function toggleJobLog(jobId, btn) {
+  const wrap = btn.closest('.job-log-wrap');
+  const collapsed = wrap.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '▶ Show log' : '▼ Hide log';
+  if (collapsed) expandedJobs.delete(jobId); else expandedJobs.add(jobId);
+}
+
 function toggleJobs() {
   jobsPanelOpen = !jobsPanelOpen;
   document.getElementById('jobsPanel').classList.toggle('open', jobsPanelOpen);
@@ -524,13 +564,16 @@ async function pollJobs() {
       const status = isRunning ? '<span class="spinner"></span>' : (j.exit_code === 0 ? '✓' : '✗');
       const args = j.args.length ? ' ' + j.args.join(' ') : '';
       const killBtn = isRunning ? `<button class="btn btn-sm" style="color:var(--red);border-color:var(--red);margin-left:8px" onclick="killJob('${j.id}')">Kill</button>` : '';
+      const wasExpanded = expandedJobs.has(j.id);
+      const collapsed = isRunning ? false : !wasExpanded;
       return `<div class="job-card" data-job-id="${j.id}">
         <div class="job-card-header">
           <span><b>${j.command}${esc(args)}</b></span>
           <span>${status} ${j.finished_at ? shortDate(j.finished_at) : 'running...'} ${killBtn}</span>
         </div>
-        <div style="position:relative">
-          <button class="btn btn-sm" style="position:absolute;top:4px;right:4px;font-size:11px;padding:2px 6px;opacity:0.7" onclick="copyLog(this)">Copy</button>
+        <div class="job-log-wrap ${collapsed ? 'collapsed' : ''}">
+          <button class="job-log-toggle" onclick="toggleJobLog('${j.id}', this)">${collapsed ? '▶ Show log' : '▼ Hide log'}</button>
+          <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;opacity:0.7;margin-left:8px" onclick="copyLog(this)">Copy</button>
           <pre>${esc(j.output || '(waiting...)')}</pre>
         </div>
       </div>`;

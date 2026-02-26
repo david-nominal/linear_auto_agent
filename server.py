@@ -25,7 +25,7 @@ SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry")
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
     "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
-    "needs_clarification": 8, "complex_skip": 9,
+    "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
 }
 
 # Job tracking (in-memory for current session)
@@ -271,12 +271,16 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/logs/"):
             rel = path[len("/api/logs/"):]
-            log_file = (LOGS_DIR / rel).resolve()
-            if not str(log_file).startswith(str(LOGS_DIR.resolve())):
+            target = (LOGS_DIR / rel).resolve()
+            if not str(target).startswith(str(LOGS_DIR.resolve())):
                 self._json_response({"error": "invalid path"}, 400)
                 return
-            if log_file.exists() and log_file.suffix == ".log":
-                content = log_file.read_text()
+            if target.is_dir():
+                files = sorted(f.name for f in target.iterdir() if f.suffix == ".log")
+                self._json_response(files)
+                return
+            if target.exists() and target.suffix == ".log":
+                content = target.read_text()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(content.encode())))
@@ -354,7 +358,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/jobs/"):
             command = path.split("/")[3]
-            if command not in ("triage", "implement", "revise", "push", "retry"):
+            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification"):
                 self._json_response({"error": f"unknown command: {command}"}, 400)
                 return
             body = self._read_body()
