@@ -145,6 +145,7 @@ def _load_all_tracking() -> list[dict]:
     items = []
     for p in TRACKING_DIR.glob("*.json"):
         items.append(json.loads(p.read_text()))
+    items.sort(key=lambda t: t.get("triaged_at", ""), reverse=True)
     items.sort(key=lambda t: STATUS_ORDER.get(t.get("status", ""), 99))
     return items
 
@@ -268,9 +269,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._json_response(result)
             return
 
-        if path.startswith("/api/logs/") and path.count("/") == 3:
-            log_name = path.split("/")[3]
-            log_file = LOGS_DIR / log_name
+        if path.startswith("/api/logs/"):
+            rel = path[len("/api/logs/"):]
+            log_file = (LOGS_DIR / rel).resolve()
+            if not str(log_file).startswith(str(LOGS_DIR.resolve())):
+                self._json_response({"error": "invalid path"}, 400)
+                return
             if log_file.exists() and log_file.suffix == ".log":
                 content = log_file.read_text()
                 self.send_response(200)

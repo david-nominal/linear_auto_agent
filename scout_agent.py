@@ -454,7 +454,6 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
     cmd = ["cursor", "agent", "--print", "--trust"]
 
     api_key = os.environ.get("CURSOR_API_KEY", "")
-    log(f"API key set: {len(api_key)} chars")
     if api_key:
         cmd += ["--api-key", api_key]
 
@@ -473,12 +472,12 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
 
     log_path = None
     if log_name:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         log_path = LOGS_DIR / f"{log_name}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     issue_hint = ""
     if log_name:
-        issue_hint = log_name.split("-triage")[0].split("-plan")[0].split("-backend")[0].split("-frontend")[0].split("-revise")[0]
+        issue_hint = log_name.split("/")[0]
 
     log(f"Agent starting ({mode or 'default'} mode, sandbox={'on' if sandbox else 'off'}, timeout={timeout}s)",
         issue=issue_hint)
@@ -601,7 +600,7 @@ def triage_issue(issue: dict, workspace: str) -> dict:
 
     for attempt in range(TRIAGE_MAX_RETRIES + 1):
         exit_code, output = run_cursor_agent(prompt, mode="ask", workspace=workspace,
-                                             log_name=f"{issue['id']}-triage",
+                                             log_name=f"{issue['id']}/triage",
                                              timeout=TRIAGE_TIMEOUT, model=model)
 
         if exit_code != 0:
@@ -711,7 +710,7 @@ def plan_issue(issue: dict, reasoning: str, repos: list[str], workspace: str) ->
         prompt += UI_PLAN_ADDENDUM
     model = os.environ.get("PLAN_MODEL") or None
     exit_code, output = run_cursor_agent(prompt, mode="plan", workspace=workspace,
-                                         log_name=f"{issue['id']}-plan",
+                                         log_name=f"{issue['id']}/plan",
                                          timeout=PLAN_TIMEOUT, model=model)
 
     if exit_code != 0:
@@ -862,7 +861,6 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
     worktree_path = str((WORKTREES_DIR / worktree_name).resolve())
 
     WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     default_branch = _get_default_branch(repo_path)
     remote_ref = f"origin/{default_branch}"
@@ -924,11 +922,11 @@ def implement_issue_for_repo(issue_id: str, tracking: dict, repo_key: str,
     model = os.environ.get("IMPL_MODEL") or None
     started_at = now_iso()
     exit_code, output = run_cursor_agent(prompt, workspace=worktree_path, yolo=True, sandbox=True,
-                                         log_name=worktree_name, timeout=IMPL_TIMEOUT,
+                                         log_name=f"{issue_id}/{repo_key}", timeout=IMPL_TIMEOUT,
                                          model=model)
     completed_at = now_iso()
 
-    log_file = LOGS_DIR / f"{worktree_name}.log"
+    log_file = LOGS_DIR / f"{issue_id}/{repo_key}.log"
 
     return {
         "repo": repo_key,
@@ -1426,7 +1424,7 @@ def cmd_approve(args: argparse.Namespace) -> None:
         log("Approved", issue=issue_id)
 
 
-def _self_review_repo(tracking: dict, repo_key: str) -> str | None:
+def _self_review_repo(tracking: dict, repo_key: str, rev_num: int = 0) -> str | None:
     """Run a read-only self-review on a repo's implementation.
 
     Returns feedback string if corrections are needed, None if LGTM.
@@ -1453,7 +1451,7 @@ def _self_review_repo(tracking: dict, repo_key: str) -> str | None:
         prompt += images_section
 
     model = os.environ.get("IMPL_MODEL") or None
-    log_name = f"{issue_id}-{repo_key}-review"
+    log_name = f"{issue_id}/{repo_key}-review-{rev_num}"
     log(f"{repo_key}: running self-review...", issue=issue_id)
     exit_code, output = run_cursor_agent(
         prompt, mode="ask", workspace=worktree_path,
@@ -1486,7 +1484,7 @@ def _review_revise_loop(tracking: dict, repo_key: str, max_revisions: int) -> in
 
     rev_count = 0
     while rev_count < max_revisions:
-        feedback = _self_review_repo(tracking, repo_key)
+        feedback = _self_review_repo(tracking, repo_key, rev_num=rev_count + 1)
         if not feedback:
             break
 
@@ -1507,7 +1505,7 @@ def _review_revise_loop(tracking: dict, repo_key: str, max_revisions: int) -> in
             prompt += images_section
 
         model = os.environ.get("IMPL_MODEL") or None
-        log_name = f"{issue_id}-{repo_key}-review-revise-{rev_count}"
+        log_name = f"{issue_id}/{repo_key}-review-revise-{rev_count}"
         exit_code, _output = run_cursor_agent(
             prompt, workspace=worktree_path, yolo=True, sandbox=True,
             log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
@@ -1839,7 +1837,7 @@ def _merge_upstream(worktree_path: str, issue_id: str, repo_key: str) -> bool:
     return False
 
 
-def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict | None:
+def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "", rev_num: int = 0) -> dict | None:
     """Revise a single repo for an issue. Returns revision record or None if skipped/failed."""
     issue_id = tracking["issue_id"]
     prs = tracking.get("pull_requests", {})
@@ -1902,7 +1900,7 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict
         prompt += images_section
 
     model = os.environ.get("IMPL_MODEL") or None
-    log_name = f"{issue_id}-{repo_key}-revise"
+    log_name = f"{issue_id}/{repo_key}-revise-{rev_num}"
     exit_code, _output = run_cursor_agent(
         prompt, workspace=worktree_path, yolo=True, sandbox=True,
         log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
@@ -1985,7 +1983,7 @@ def _revise_issue(tracking: dict, max_revisions: int = DEFAULT_MAX_REVIEW_REVISI
                 else:
                     log("WARNING: Failed to re-link backend APIs", issue=issue_id)
 
-        revision = _revise_repo(tracking, repo_key, extra_context=extra_context)
+        revision = _revise_repo(tracking, repo_key, extra_context=extra_context, rev_num=len(revisions) + 1)
         if revision:
             revisions.append(revision)
             if repo_key == "backend":

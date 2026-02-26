@@ -283,7 +283,7 @@ function renderDetail(t) {
       if (!v) continue;
       const duration = v.started_at && v.completed_at ? timeDiff(v.started_at, v.completed_at) : '-';
       const exit = v.exit_code != null ? (v.exit_code === 0 ? '✓' : '✗ ' + v.exit_code) : '-';
-      const logLink = v.output_log ? `<a href="/api/logs/${encodeURIComponent(v.output_log.split('/').pop())}" target="_blank">log</a>` : '';
+      const logLink = v.output_log ? (() => { const parts = v.output_log.split('/'); return `<a href="/api/logs/${parts.slice(-2).map(encodeURIComponent).join('/')}" target="_blank">log</a>`; })() : '';
       implHtml += `<tr><td>${repo}</td><td><code>${v.worktree_branch || '-'}</code></td><td>${exit} ${logLink}</td><td>${duration}</td></tr>`;
     }
     implHtml += '</table>';
