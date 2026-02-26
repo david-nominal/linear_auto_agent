@@ -29,8 +29,8 @@ LOGS_DIR = DATA_DIR / "logs"
 WORKSPACE_DIR = DATA_DIR / "workspace"
 
 REPOS = {
-    "backend": {"env_var": "BACKEND_REPO", "symlink_name": "scout", "description": "Java backend"},
-    "frontend": {"env_var": "FRONTEND_REPO", "symlink_name": "galaxy", "description": "TypeScript frontend"},
+    "backend": {"env_var": "BACKEND_REPO", "clone_url": "git@github.com:nominal-io/scout.git", "description": "Java + Python backend"},
+    "frontend": {"env_var": "FRONTEND_REPO", "clone_url": "git@github.com:nominal-io/galaxy.git", "description": "TypeScript frontend + tRPC backend, nominal-mcp, and multiplayer servers"},
 }
 
 TRIAGE_TIMEOUT = 60
@@ -197,37 +197,50 @@ def get_repo_path(repo_key: str) -> str:
     if not path:
         print(f"ERROR: {cfg['env_var']} not set in .env", file=sys.stderr)
         sys.exit(1)
-    if not Path(path).is_dir():
-        print(f"ERROR: {cfg['env_var']}={path} is not a directory", file=sys.stderr)
-        sys.exit(1)
     return path
 
 
-def ensure_workspace_symlinks() -> Path:
-    """Create data/workspace/ with symlinks to both repos and a root AGENTS.md."""
+def ensure_workspace() -> Path:
+    """Ensure data/workspace/ exists, clone missing repos, and write root AGENTS.md."""
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
     for repo_key, cfg in REPOS.items():
-        link = WORKSPACE_DIR / cfg["symlink_name"]
-        target = Path(get_repo_path(repo_key)).resolve()
-        if link.is_symlink():
-            if link.resolve() == target:
-                continue
-            link.unlink()
-        elif link.exists():
-            print(f"ERROR: {link} exists and is not a symlink", file=sys.stderr)
-            sys.exit(1)
-        link.symlink_to(target)
+        repo_path = Path(os.environ.get(cfg["env_var"], ""))
+        if not repo_path or not str(repo_path).strip():
+            continue
+        if not repo_path.is_dir():
+            log(f"Cloning {repo_key} into {repo_path}...")
+            result = subprocess.run(
+                ["git", "clone", cfg["clone_url"], str(repo_path)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                log(f"  Clone failed for {repo_key}: {result.stderr.strip()}", file=sys.stderr)
 
     agents_md = WORKSPACE_DIR / "AGENTS.md"
     agents_md.write_text(
         "# Workspace\n\n"
         "This workspace contains two repos:\n\n"
-        "- **scout/** — Java and python backend (see `scout/AGENTS.md` for conventions)\n"
-        "- **galaxy/** — TypeScript frontend (see `galaxy/AGENTS.md` for conventions)\n\n"
+        "- **scout/** — Java + Python backend (see `scout/AGENTS.md` for conventions)\n"
+        "- **galaxy/** — TypeScript frontend, tRPC backend, nominal-mcp, and multiplayer servers (see `galaxy/AGENTS.md` for conventions)\n\n"
         "Read the repo-specific AGENTS.md files before making decisions about code structure, "
         "patterns, or implementation approach.\n"
     )
     return WORKSPACE_DIR
+
+
+def _fetch_repos() -> None:
+    """Fetch latest default branch for all configured repos."""
+    for repo_key in REPOS:
+        repo_path = get_repo_path(repo_key)
+        default_branch = _get_default_branch(repo_path)
+        log(f"Fetching latest {default_branch} for {repo_key}...")
+        result = subprocess.run(
+            ["git", "-C", repo_path, "pull", "--ff-only", "origin", default_branch],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log(f"  Warning: pull failed for {repo_key}: {result.stderr.strip()}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -567,8 +580,8 @@ You are triaging a Linear issue for an automated agent system.
 ## Context
 
 The workspace contains two repos:
-- scout/ — Java backend (Gradle, Conjure APIs, Postgres, ClickHouse, Temporal)
-- galaxy/ — TypeScript frontend (React)
+- scout/ — Java + Python backend (Gradle, Conjure APIs, Postgres, ClickHouse, Temporal)
+- galaxy/ — TypeScript frontend (React), tRPC backend, nominal-mcp, and multiplayer servers
 
 ## Instructions
 
@@ -647,8 +660,8 @@ You are creating an implementation plan for a Linear issue that has been triaged
 ## Context
 
 The workspace contains two repos:
-- scout/ — Java backend (Gradle, Conjure APIs, Postgres, ClickHouse, Temporal). Conventions in scout/AGENTS.md.
-- galaxy/ — TypeScript frontend (React)
+- scout/ — Java + Python backend (Gradle, Conjure APIs, Postgres, ClickHouse, Temporal). Conventions in scout/AGENTS.md.
+- galaxy/ — TypeScript frontend (React), tRPC backend, nominal-mcp, and multiplayer servers
 
 ## Instructions
 
@@ -801,7 +814,7 @@ def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
 # ---------------------------------------------------------------------------
 
 IMPLEMENT_PROMPT_BACKEND = """\
-You are implementing a Linear issue on a git worktree of the Java backend repo (scout).
+You are implementing a Linear issue on a git worktree of the Java + Python backend repo (scout).
 
 ## Issue: {id} — {title}
 
@@ -821,7 +834,7 @@ You are implementing a Linear issue on a git worktree of the Java backend repo (
 """
 
 IMPLEMENT_PROMPT_FRONTEND = """\
-You are implementing a Linear issue on a git worktree of the TypeScript frontend repo (galaxy).
+You are implementing a Linear issue on a git worktree of the galaxy repo (TypeScript frontend, tRPC backend, nominal-mcp, and multiplayer servers).
 
 ## Issue: {id} — {title}
 
@@ -1325,7 +1338,8 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
 
 
 def cmd_triage(args: argparse.Namespace) -> None:
-    workspace = str(ensure_workspace_symlinks())
+    workspace = str(ensure_workspace())
+    _fetch_repos()
 
     log("Fetching issues from Linear...")
     issues = fetch_issues()
@@ -1610,7 +1624,8 @@ def cmd_implement(args: argparse.Namespace) -> None:
 def cmd_retry(args: argparse.Namespace) -> None:
     """Retry failed triage or implementation for specific issues (or all failed)."""
     tracked = load_all_tracking()
-    workspace = str(ensure_workspace_symlinks())
+    workspace = str(ensure_workspace())
+    _fetch_repos()
 
     if args.issue_ids:
         issue_ids = args.issue_ids
