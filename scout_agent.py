@@ -513,8 +513,8 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
     - --print mode: MCPs require interactive approval, which is impossible headlessly,
       so all MCP servers are effectively blocked (unless --approve-mcps is passed, which we never do).
     - --mode ask/plan: read-only, no file edits, no shell commands.
-    - --sandbox enabled: OS-level (macOS Seatbelt) restriction — writes only to workspace + /tmp,
-      no network access. Used for implementation agents to hard-scope writes to the worktree.
+    - --sandbox enabled: OS-level restriction (Seatbelt on macOS, Landlock+seccomp on Linux) —
+      writes only to workspace + /tmp, no network. Requires kernel 6.2+ on Linux.
     """
     cmd = ["cursor", "agent", "--print", "--trust"]
 
