@@ -503,6 +503,17 @@ def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
         log(f"  generateProtoZipNpmPackage done ({_fmt_duration(time.monotonic() - t1)})")
 
     t2 = time.monotonic()
+    log("  Installing frontend dependencies...")
+    result = subprocess.run(
+        ["pnpm", "install", "--frozen-lockfile"],
+        capture_output=True, text=True, cwd=fe_worktree, timeout=300,
+    )
+    if result.returncode != 0:
+        log(f"  pnpm install failed: {result.stderr[:500]}")
+        return False
+    log(f"  pnpm install done ({_fmt_duration(time.monotonic() - t2)})")
+
+    t3 = time.monotonic()
     log("  Linking scout APIs in frontend worktree...")
     result = subprocess.run(
         ["pnpm", "scout:link", be_worktree],
@@ -511,9 +522,9 @@ def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
     if result.returncode != 0:
         log(f"  scout:link failed: {result.stderr[:500]}")
         return False
-    log(f"  scout:link done ({_fmt_duration(time.monotonic() - t2)})")
+    log(f"  scout:link done ({_fmt_duration(time.monotonic() - t3)})")
 
-    t3 = time.monotonic()
+    t4 = time.monotonic()
     log("  Running proto codegen...")
     result = subprocess.run(
         ["pnpm", "generate:proto"],
@@ -522,7 +533,7 @@ def link_be_to_fe(be_worktree: str, fe_worktree: str) -> bool:
     if result.returncode != 0:
         log(f"  generate:proto failed (non-fatal): {result.stderr[:500]}")
     else:
-        log(f"  generate:proto done ({_fmt_duration(time.monotonic() - t3)})")
+        log(f"  generate:proto done ({_fmt_duration(time.monotonic() - t4)})")
 
     log(f"  FE/BE linking complete ({_fmt_duration(time.monotonic() - t0)})")
     return True
@@ -1071,6 +1082,10 @@ def cmd_implement(args: argparse.Namespace) -> None:
 
     elapsed = time.monotonic() - t0
     log(f"Implementation complete in {_fmt_duration(elapsed)}: {succeeded}/{total} succeeded")
+
+    if succeeded:
+        push_args = argparse.Namespace(all=True, issue_ids=[], link_issue=False)
+        cmd_push(push_args)
 
 
 def cmd_retry(args: argparse.Namespace) -> None:
