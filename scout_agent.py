@@ -83,7 +83,7 @@ def get_repo_path(repo_key: str) -> str:
 
 
 def ensure_workspace_symlinks() -> Path:
-    """Create data/workspace/ with symlinks to both repos."""
+    """Create data/workspace/ with symlinks to both repos and a root AGENTS.md."""
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     for repo_key, cfg in REPOS.items():
         link = WORKSPACE_DIR / cfg["symlink_name"]
@@ -96,6 +96,16 @@ def ensure_workspace_symlinks() -> Path:
             print(f"ERROR: {link} exists and is not a symlink", file=sys.stderr)
             sys.exit(1)
         link.symlink_to(target)
+
+    agents_md = WORKSPACE_DIR / "AGENTS.md"
+    agents_md.write_text(
+        "# Workspace\n\n"
+        "This workspace contains two repos:\n\n"
+        "- **scout/** — Java and python backend (see `scout/AGENTS.md` for conventions)\n"
+        "- **galaxy/** — TypeScript frontend (see `galaxy/AGENTS.md` for conventions)\n\n"
+        "Read the repo-specific AGENTS.md files before making decisions about code structure, "
+        "patterns, or implementation approach.\n"
+    )
     return WORKSPACE_DIR
 
 
@@ -442,6 +452,31 @@ into the frontend worktree, so the frontend agent can compile against the new ba
 Output your plan as a clear, numbered list per repo. Be specific about file paths.
 """
 
+UI_PLAN_ADDENDUM = """
+
+## Additional instructions for frontend / UI changes
+
+Before writing the plan, explore 2-3 existing pages or components in galaxy/ that are \
+most similar to the feature being implemented. Use them as visual and structural references.
+
+Your frontend plan MUST include a "## UI Design" section covering:
+
+1. **Design precedent** — Name a specific existing page or feature in galaxy/ that the new UI \
+should visually match (e.g., "model this after the Runs table page"). The implementation agent \
+will use this as a reference.
+2. **Component reuse** — List which existing shared components to use (buttons, modals, tables, \
+form inputs, layout containers, etc.). Prefer reusing existing components over creating new ones.
+3. **Layout structure** — Describe the visual hierarchy and layout (e.g., "sidebar with filter \
+panel on left, scrollable data table on right, action bar pinned to top").
+4. **Styling approach** — Specify which CSS patterns, theme variables, spacing tokens, or \
+design tokens to follow, based on what you observe in the codebase. Reference specific files \
+if helpful.
+
+The goal: the implementation agent should be able to build a visually consistent UI without \
+guessing at layout or style. Be concrete — "use the same card layout as WorkspaceSettings" \
+is better than "use a card layout".
+"""
+
 
 def _extract_plan_summary(plan_text: str) -> str | None:
     """Extract the ## Summary section from a plan."""
@@ -455,6 +490,8 @@ def plan_issue(issue: dict, reasoning: str, repos: list[str], workspace: str) ->
     """Generate an implementation plan. Returns (plan_text, plan_summary)."""
     repos_str = ", ".join(repos)
     prompt = PLAN_PROMPT.format(**issue, reasoning=reasoning, repos_str=repos_str)
+    if "frontend" in repos:
+        prompt += UI_PLAN_ADDENDUM
     model = os.environ.get("PLAN_MODEL") or None
     exit_code, output = run_cursor_agent(prompt, mode="plan", workspace=workspace,
                                          log_name=f"{issue['id']}-plan",
@@ -1318,100 +1355,142 @@ def _merge_upstream(worktree_path: str, issue_id: str, repo_key: str) -> bool:
     return False
 
 
+def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "") -> dict | None:
+    """Revise a single repo for an issue. Returns revision record or None if skipped/failed."""
+    issue_id = tracking["issue_id"]
+    prs = tracking.get("pull_requests", {})
+    pr_info = prs.get(repo_key, {})
+    pr_url = pr_info.get("url", "")
+    if not pr_url:
+        return None
+
+    log(f"{repo_key}: checking PR {pr_url}", issue=issue_id)
+    comments = fetch_pr_comments(pr_url)
+
+    if not comments:
+        log(f"{repo_key}: no unresolved comments, skipping", issue=issue_id)
+        return None
+
+    log(f"{repo_key}: found {len(comments)} unresolved comment(s)", issue=issue_id)
+
+    impl = tracking.get("implementations", {}).get(repo_key, {})
+    worktree_path = impl.get("worktree_path")
+    if not worktree_path or not Path(worktree_path).is_dir():
+        log(f"{repo_key}: worktree not found at {worktree_path}, skipping", issue=issue_id)
+        return None
+
+    merge_conflict = _merge_upstream(worktree_path, issue_id, repo_key)
+
+    comments_formatted = _format_comments_for_prompt(comments)
+    if merge_conflict:
+        comments_formatted += (
+            "\n\nADDITIONAL TASK: There are merge conflicts with the main branch that "
+            "have been left as conflict markers in the working tree. Resolve all merge "
+            "conflicts, then run compilation/tests."
+        )
+    if extra_context:
+        comments_formatted += f"\n\n{extra_context}"
+
+    prior_log = ""
+    impl_log_path = impl.get("output_log", "")
+    if impl_log_path and Path(impl_log_path).exists():
+        content = Path(impl_log_path).read_text()
+        prior_log = content[-4000:] if len(content) > 4000 else content
+
+    triage = tracking.get("triage", {})
+    triage_text = triage.get("summary", "") if isinstance(triage, dict) else str(triage)
+
+    prompt = REVISE_PROMPT.format(
+        id=issue_id, title=tracking["title"],
+        description=tracking.get("description", ""),
+        triage=triage_text or "No triage available",
+        plan=tracking.get("plan", "No plan available"),
+        prior_log=prior_log or "No prior log available",
+        comments_formatted=comments_formatted,
+    )
+
+    model = os.environ.get("IMPL_MODEL") or None
+    log_name = f"{issue_id}-{repo_key}-revise"
+    exit_code, _output = run_cursor_agent(
+        prompt, workspace=worktree_path, yolo=True, sandbox=True,
+        log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
+    )
+
+    log_file = LOGS_DIR / f"{log_name}.log"
+
+    if exit_code != 0:
+        log(f"{repo_key}: revision agent FAILED (exit={exit_code})", issue=issue_id)
+        if log_file.exists():
+            log(f"  Log: {log_file}", issue=issue_id)
+        return None
+
+    log(f"{repo_key}: pushing revision...", issue=issue_id)
+    push_result = subprocess.run(
+        ["git", "-C", worktree_path, "push"],
+        capture_output=True, text=True,
+    )
+    if push_result.returncode != 0:
+        log(f"{repo_key}: push failed: {push_result.stderr.strip()}", issue=issue_id)
+        return None
+
+    log(f"{repo_key}: revision pushed successfully", issue=issue_id)
+
+    thread_ids = [c.get("thread_id") for c in comments if c.get("thread_id")]
+    if thread_ids:
+        resolved = resolve_pr_threads(thread_ids, issue_id=issue_id)
+        log(f"{repo_key}: resolved {resolved}/{len(thread_ids)} review thread(s)", issue=issue_id)
+
+    return {
+        "repo": repo_key,
+        "comments_addressed": len(comments),
+        "revised_at": now_iso(),
+        "exit_code": exit_code,
+        "log": str(log_file),
+    }
+
+
 def _revise_issue(tracking: dict) -> dict:
-    """Check for unresolved PR comments and run agents to address them."""
+    """Check for unresolved PR comments and run agents to address them.
+
+    Processes backend first so that if BE changes occur, the updated APIs
+    can be linked into the frontend worktree before the FE agent runs.
+    """
     issue_id = tracking["issue_id"]
     prs = tracking.get("pull_requests", {})
     if not prs:
         return tracking
 
     revisions = tracking.get("revisions", [])
+    impls = tracking.get("implementations", {})
 
-    for repo_key, pr_info in prs.items():
-        pr_url = pr_info.get("url", "")
-        if not pr_url:
-            continue
+    # Process BE first so we can link updated APIs into FE
+    repo_order = sorted(prs.keys(), key=lambda r: (r != "backend", r))
 
-        log(f"{repo_key}: checking PR {pr_url}", issue=issue_id)
-        comments = fetch_pr_comments(pr_url)
+    be_revised = False
+    for repo_key in repo_order:
+        extra_context = ""
 
-        if not comments:
-            log(f"{repo_key}: no unresolved comments, skipping", issue=issue_id)
-            continue
+        # If BE was just revised, re-link into FE so it compiles against updated types
+        if repo_key == "frontend" and be_revised:
+            be_wt = impls.get("backend", {}).get("worktree_path")
+            fe_wt = impls.get("frontend", {}).get("worktree_path")
+            if be_wt and fe_wt and Path(be_wt).is_dir() and Path(fe_wt).is_dir():
+                log("Re-linking backend APIs into frontend after BE revision...", issue=issue_id)
+                if link_be_to_fe(be_wt, fe_wt):
+                    extra_context = (
+                        "NOTE: The backend was also revised in this cycle. The updated backend "
+                        "APIs have been rebuilt and linked locally into this worktree via "
+                        "scout:link. If the backend changes affect types or endpoints you use, "
+                        "make sure the frontend code is consistent with the new backend APIs."
+                    )
+                else:
+                    log("WARNING: Failed to re-link backend APIs", issue=issue_id)
 
-        log(f"{repo_key}: found {len(comments)} unresolved comment(s)", issue=issue_id)
-
-        impl = tracking.get("implementations", {}).get(repo_key, {})
-        worktree_path = impl.get("worktree_path")
-        if not worktree_path or not Path(worktree_path).is_dir():
-            log(f"{repo_key}: worktree not found at {worktree_path}, skipping", issue=issue_id)
-            continue
-
-        merge_conflict = _merge_upstream(worktree_path, issue_id, repo_key)
-
-        comments_formatted = _format_comments_for_prompt(comments)
-        if merge_conflict:
-            comments_formatted += (
-                "\n\nADDITIONAL TASK: There are merge conflicts with the main branch that "
-                "have been left as conflict markers in the working tree. Resolve all merge "
-                "conflicts, then run compilation/tests."
-            )
-
-        prior_log = ""
-        impl_log_path = impl.get("output_log", "")
-        if impl_log_path and Path(impl_log_path).exists():
-            content = Path(impl_log_path).read_text()
-            prior_log = content[-4000:] if len(content) > 4000 else content
-
-        triage = tracking.get("triage", {})
-        triage_text = triage.get("summary", "") if isinstance(triage, dict) else str(triage)
-
-        prompt = REVISE_PROMPT.format(
-            id=issue_id, title=tracking["title"],
-            description=tracking.get("description", ""),
-            triage=triage_text or "No triage available",
-            plan=tracking.get("plan", "No plan available"),
-            prior_log=prior_log or "No prior log available",
-            comments_formatted=comments_formatted,
-        )
-
-        model = os.environ.get("IMPL_MODEL") or None
-        log_name = f"{issue_id}-{repo_key}-revise"
-        exit_code, _output = run_cursor_agent(
-            prompt, workspace=worktree_path, yolo=True, sandbox=True,
-            log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
-        )
-
-        log_file = LOGS_DIR / f"{log_name}.log"
-
-        if exit_code != 0:
-            log(f"{repo_key}: revision agent FAILED (exit={exit_code})", issue=issue_id)
-            if log_file.exists():
-                log(f"  Log: {log_file}", issue=issue_id)
-            continue
-
-        log(f"{repo_key}: pushing revision...", issue=issue_id)
-        push_result = subprocess.run(
-            ["git", "-C", worktree_path, "push"],
-            capture_output=True, text=True,
-        )
-        if push_result.returncode != 0:
-            log(f"{repo_key}: push failed: {push_result.stderr.strip()}", issue=issue_id)
-            continue
-
-        log(f"{repo_key}: revision pushed successfully", issue=issue_id)
-
-        thread_ids = [c.get("thread_id") for c in comments if c.get("thread_id")]
-        if thread_ids:
-            resolved = resolve_pr_threads(thread_ids, issue_id=issue_id)
-            log(f"{repo_key}: resolved {resolved}/{len(thread_ids)} review thread(s)", issue=issue_id)
-        revisions.append({
-            "repo": repo_key,
-            "comments_addressed": len(comments),
-            "revised_at": now_iso(),
-            "exit_code": exit_code,
-            "log": str(log_file),
-        })
+        revision = _revise_repo(tracking, repo_key, extra_context=extra_context)
+        if revision:
+            revisions.append(revision)
+            if repo_key == "backend":
+                be_revised = True
 
     tracking["revisions"] = revisions
     return tracking
