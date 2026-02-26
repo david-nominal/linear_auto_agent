@@ -6,10 +6,7 @@ Automated triage and implementation of Linear issues using Cursor Agent CLI.
 
 1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 2. Authenticate cursor agent: `cursor agent login`
-3. Copy `.env.example` to `.env` and fill in:
-   - `LINEAR_API_KEY` — personal API key from https://linear.app/settings/account/security
-   - `BACKEND_REPO` — absolute path to the backend repo (e.g. `/Users/you/git/scout`)
-   - `FRONTEND_REPO` — absolute path to the frontend repo (e.g. `/Users/you/git/galaxy`)
+3. Copy `.env.example` to `.env` and fill in keys.
 
 Optional model overrides (uses cursor agent's default model if unset):
    - `TRIAGE_MODEL` — model for triage (e.g. `gpt-4o-mini` for speed/cost)
@@ -64,9 +61,9 @@ The agent works across two repos simultaneously:
 - **scout** (Java backend) — Gradle, Conjure APIs, Postgres, ClickHouse, Temporal
 - **galaxy** (TypeScript frontend) — React
 
-For read-only steps (triage + planning), a symlinked workspace at `data/workspace/` gives the agent
-visibility into both repos in a single call. For implementation, separate git worktrees are created
-per affected repo for isolation.
+Repos are cloned into `data/workspace/` automatically on first run. For read-only steps (triage +
+planning), this workspace gives the agent visibility into both repos in a single call. For
+implementation, separate git worktrees are created per affected repo for isolation.
 
 If an issue requires changes to both repos, the backend is implemented first. Then the scout
 Conjure TypeScript and proto zip are built locally and linked into the galaxy worktree via
@@ -95,9 +92,9 @@ Conjure TypeScript and proto zip are built locally and linked into the galaxy wo
 
 ```
 data/
-├── workspace/         # Symlinks to repos (auto-created)
-│   ├── scout -> /path/to/scout
-│   └── galaxy -> /path/to/galaxy
+├── workspace/         # Cloned repos (auto-created)
+│   ├── scout/
+│   └── galaxy/
 ├── tracking/          # Per-issue JSON decision records
 │   └── ENG-123.json
 ├── worktrees/         # Git worktrees for implementation

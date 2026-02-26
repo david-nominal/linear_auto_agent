@@ -29,8 +29,8 @@ LOGS_DIR = DATA_DIR / "logs"
 WORKSPACE_DIR = DATA_DIR / "workspace"
 
 REPOS = {
-    "backend": {"env_var": "BACKEND_REPO", "clone_url": "git@github.com:nominal-io/scout.git", "description": "Java + Python backend"},
-    "frontend": {"env_var": "FRONTEND_REPO", "clone_url": "git@github.com:nominal-io/galaxy.git", "description": "TypeScript frontend + tRPC backend, nominal-mcp, and multiplayer servers"},
+    "backend": {"dir": "scout", "clone_url": "git@github.com:nominal-io/scout.git", "description": "Java + Python backend"},
+    "frontend": {"dir": "galaxy", "clone_url": "git@github.com:nominal-io/galaxy.git", "description": "TypeScript frontend + tRPC backend, nominal-mcp, and multiplayer servers"},
 }
 
 TRIAGE_TIMEOUT = 60
@@ -192,12 +192,11 @@ def format_images_for_prompt(downloaded: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def get_repo_path(repo_key: str) -> str:
-    cfg = REPOS[repo_key]
-    path = os.environ.get(cfg["env_var"], "")
-    if not path:
-        print(f"ERROR: {cfg['env_var']} not set in .env", file=sys.stderr)
+    repo_dir = WORKSPACE_DIR / REPOS[repo_key]["dir"]
+    if not repo_dir.is_dir():
+        print(f"ERROR: repo not found at {repo_dir} — run triage or ensure_workspace first", file=sys.stderr)
         sys.exit(1)
-    return path
+    return str(repo_dir)
 
 
 def ensure_workspace() -> Path:
@@ -205,9 +204,7 @@ def ensure_workspace() -> Path:
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     for repo_key, cfg in REPOS.items():
-        repo_path = Path(os.environ.get(cfg["env_var"], ""))
-        if not repo_path or not str(repo_path).strip():
-            continue
+        repo_path = WORKSPACE_DIR / cfg["dir"]
         if not repo_path.is_dir():
             log(f"Cloning {repo_key} into {repo_path}...")
             result = subprocess.run(
