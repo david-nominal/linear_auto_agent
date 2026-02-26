@@ -261,7 +261,7 @@ def fetch_issues() -> list[dict]:
             after: $cursor
             filter: {
                 state: {
-                    type: { nin: ["started", "completed", "cancelled"] }
+                    type: { nin: ["started", "completed", "canceled"] }
                 }
                 hasDuplicateRelations: { eq: false }
             }
@@ -2523,6 +2523,7 @@ def main():
 
     p_implement = sub.add_parser("implement", help="Implement approved issues")
     p_implement.add_argument("issue_ids", nargs="*", help="Issue identifiers to implement (default: all approved)")
+    p_implement.add_argument("--limit", type=int, default=None, help="Max issues to implement")
     p_implement.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                              help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_implement)
@@ -2544,6 +2545,7 @@ def main():
 
     p_revise = sub.add_parser("revise", help="Address PR review feedback for pushed issues")
     p_revise.add_argument("issue_ids", nargs="*", help="Issue identifiers to revise (default: all pushed)")
+    p_revise.add_argument("--limit", type=int, default=None, help="Max issues to revise")
     p_revise.add_argument("--max-revisions", type=int, default=None,
                           help="Skip issues that already have this many revisions")
     _add_workers_arg(p_revise)

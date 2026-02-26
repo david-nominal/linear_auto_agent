@@ -10,7 +10,7 @@
     --bg: #0d1117; --surface: #161b22; --surface2: #21262d; --border: #30363d;
     --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
     --yellow: #d29922; --blue: #58a6ff; --green: #3fb950; --purple: #bc8cff;
-    --red: #f85149; --gray: #8b949e;
+    --red: #f85149; --gray: #8b949e; --teal: #56d4c4;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
@@ -25,6 +25,7 @@
   .btn-sm { padding: 3px 10px; font-size: 12px; }
   .btn-yellow { background: #5c4813; border-color: var(--yellow); color: var(--yellow); }
   .btn-blue { background: #1a3a5c; border-color: var(--blue); color: var(--blue); }
+  .btn-teal { background: #133a36; border-color: var(--teal); color: var(--teal); }
 
   .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
 
@@ -141,6 +142,8 @@
     <div class="cmd-group">
       <button class="btn btn-primary" id="btn-implement" onclick="toggleCmd('implement')">Implement ▾</button>
       <div class="cmd-dropdown" id="cmd-implement">
+        <label>Limit (max issues)</label>
+        <input type="number" id="impl-limit" placeholder="all" min="1">
         <label>Workers</label>
         <input type="number" id="impl-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -156,6 +159,8 @@
     <div class="cmd-group">
       <button class="btn btn-blue" id="btn-revise" onclick="toggleCmd('revise')">Revise ▾</button>
       <div class="cmd-dropdown" id="cmd-revise">
+        <label>Limit (max issues)</label>
+        <input type="number" id="revise-limit" placeholder="all" min="1">
         <label>Workers</label>
         <input type="number" id="revise-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -185,7 +190,7 @@
         <button class="btn btn-sm" onclick="launchSweep()" style="width:100%;background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Run Sweep</button>
       </div>
     </div>
-    <button class="btn btn-sm" onclick="runJob('notify_ready')" title="Check PRs and notify reviewer">Notify Ready</button>
+    <button class="btn btn-teal btn-sm" onclick="runJob('notify_ready')" title="Check PRs and notify reviewer">Notify Ready</button>
     <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
       Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
     </button>
@@ -450,13 +455,17 @@ function launchTriage() {
 }
 function launchImpl() {
   const args = [];
+  const limit = document.getElementById('impl-limit').value;
   const workers = document.getElementById('impl-workers').value;
+  if (limit) args.push('--limit', limit);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('implement', args);
 }
 function launchRevise() {
   const args = [];
+  const limit = document.getElementById('revise-limit').value;
   const workers = document.getElementById('revise-workers').value;
+  if (limit) args.push('--limit', limit);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('revise', args);
 }
@@ -516,10 +525,14 @@ function getSchedArgs(cmd) {
     if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'implement') {
+    const limit = document.getElementById('impl-limit').value;
     const workers = document.getElementById('impl-workers').value;
+    if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'revise') {
+    const limit = document.getElementById('revise-limit').value;
     const workers = document.getElementById('revise-workers').value;
+    if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'sweep') {
     const limit = document.getElementById('sweep-limit').value;
