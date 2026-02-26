@@ -1118,7 +1118,7 @@ ensure your changes stay consistent with the overall intent.
 - Do NOT push to remote. Do NOT create a PR.
 """
 
-DEFAULT_MAX_REVIEW_REVISIONS = 5
+DEFAULT_MAX_REVIEW_REVISIONS = 10
 
 
 def resolve_pr_threads(thread_ids: list[str], issue_id: str = "") -> int:
@@ -1196,6 +1196,42 @@ def _parse_pr_url(pr_url: str) -> tuple[str, str, str] | None:
     if match:
         return match.group(1), match.group(2), match.group(3)
     return None
+
+
+def check_pr_ci_status(pr_url: str) -> tuple[str, str]:
+    """Check CI status for a PR. Returns (status, summary) where status is 'passing', 'failing', or 'pending'.
+
+    Summary contains failure details when status is 'failing'.
+    """
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        return "pending", ""
+    owner, repo, number = parsed
+
+    result = subprocess.run(
+        ["gh", "pr", "checks", number, "--repo", f"{owner}/{repo}", "--json", "name,state,description"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return "pending", ""
+
+    try:
+        checks = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return "pending", ""
+
+    if not checks:
+        return "pending", ""
+
+    failing = [c for c in checks if c.get("state") in ("FAILURE", "ERROR")]
+    pending = [c for c in checks if c.get("state") in ("PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED")]
+
+    if failing:
+        summaries = [f"- {c['name']}: {c.get('description', 'failed')}" for c in failing]
+        return "failing", "\n".join(summaries)
+    if pending:
+        return "pending", ""
+    return "passing", ""
 
 
 def fetch_pr_comments(pr_url: str) -> list[dict]:
@@ -1386,8 +1422,14 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
         plan, plan_summary = plan_issue(issue, decision["reasoning"], repos, workspace)
         tracking_data["plan"] = plan
         tracking_data["plan_summary"] = plan_summary
-        tracking_data["status"] = "awaiting_approval"
-        log("Plan saved — awaiting approval", issue=iid)
+
+        auto_approve = os.environ.get("AUTO_APPROVE_EASY", "true").lower() in ("1", "true", "yes")
+        if auto_approve and decision["decision"] == "easy":
+            tracking_data["status"] = "approved"
+            log("Easy issue auto-approved", issue=iid)
+        else:
+            tracking_data["status"] = "awaiting_approval"
+            log("Plan saved — awaiting approval", issue=iid)
 
     return tracking_data
 
@@ -1441,6 +1483,8 @@ def cmd_triage(args: argparse.Namespace) -> None:
     done = 0
     counts: dict[str, int] = {}
 
+    auto_clarify = os.environ.get("AUTO_ASK_CLARIFICATION", "false").lower() in ("1", "true", "yes")
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_triage_and_plan_issue, issue, workspace): issue
                    for issue in to_triage}
@@ -1448,6 +1492,8 @@ def cmd_triage(args: argparse.Namespace) -> None:
             issue = futures[future]
             try:
                 tracking_data = future.result()
+                if auto_clarify and tracking_data.get("status") == "needs_clarification":
+                    _post_clarification(tracking_data)
                 save_tracking(issue["id"], tracking_data)
                 decision = tracking_data.get("decision", "unknown")
                 counts[decision] = counts.get(decision, 0) + 1
@@ -1769,6 +1815,30 @@ def cmd_retry(args: argparse.Namespace) -> None:
                     log(f"Re-implementation failed: {exc}", issue=orig["issue_id"], file=sys.stderr)
 
 
+def _post_clarification(tracking: dict) -> bool:
+    """Post a clarification comment on Linear and update tracking in-place. Returns True on success."""
+    issue_id = tracking["issue_id"]
+    reasoning = tracking.get("reasoning", "")
+    if not reasoning:
+        log("No reasoning available to post", issue=issue_id)
+        return False
+
+    comment_body = (
+        "**🏐 Spiky needs clarification for auto-implementation:**\n\n"
+        f"{reasoning}\n\n"
+        "_Please reply with the requested details so we can proceed._"
+    )
+
+    log(f"Posting clarification comment...", issue=issue_id)
+    if not post_linear_comment(issue_id, comment_body):
+        log("Failed to post comment", issue=issue_id, file=sys.stderr)
+        return False
+
+    tracking["status"] = "asked_clarification"
+    tracking["clarification_asked_at"] = now_iso()
+    return True
+
+
 def cmd_ask_clarification(args: argparse.Namespace) -> None:
     """Post a clarification comment on Linear and update status."""
     issue_id = args.issue_ids[0]
@@ -1780,24 +1850,8 @@ def cmd_ask_clarification(args: argparse.Namespace) -> None:
         log(f"Status is '{tracking['status']}', expected 'needs_clarification'", issue=issue_id)
         return
 
-    reasoning = tracking.get("reasoning", "")
-    if not reasoning:
-        log("No reasoning available to post", issue=issue_id)
+    if not _post_clarification(tracking):
         return
-
-    comment_body = (
-        "**🏐 Spiky needs clarification for auto-implementation:**\n\n"
-        f"{reasoning}\n\n"
-        "_Please reply with the requested details so we can proceed._"
-    )
-
-    log(f"Posting clarification comment...", issue=issue_id)
-    if not post_linear_comment(issue_id, comment_body):
-        log("Failed to post comment", issue=issue_id, file=sys.stderr)
-        return
-
-    tracking["status"] = "asked_clarification"
-    tracking["clarification_asked_at"] = now_iso()
     save_tracking(issue_id, tracking)
     log("Clarification comment posted — awaiting reply", issue=issue_id)
 
@@ -1974,11 +2028,24 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "", rev_num
     log(f"{repo_key}: checking PR {pr_url}", issue=issue_id)
     comments = fetch_pr_comments(pr_url)
 
-    if not comments:
-        log(f"{repo_key}: no unresolved comments, skipping", issue=issue_id)
+    ci_status, ci_summary = check_pr_ci_status(pr_url)
+    if ci_status == "failing":
+        log(f"{repo_key}: CI failing", issue=issue_id)
+        extra_context += (
+            f"\n\nCI FAILURES — the following CI checks are failing on this PR. "
+            f"Fix them:\n{ci_summary}"
+        )
+
+    if not comments and ci_status != "failing":
+        log(f"{repo_key}: no unresolved comments and CI OK, skipping", issue=issue_id)
         return None
 
-    log(f"{repo_key}: found {len(comments)} unresolved comment(s)", issue=issue_id)
+    reasons = []
+    if comments:
+        reasons.append(f"{len(comments)} unresolved comment(s)")
+    if ci_status == "failing":
+        reasons.append("CI failing")
+    log(f"{repo_key}: revising — {', '.join(reasons)}", issue=issue_id)
 
     impl = tracking.get("implementations", {}).get(repo_key, {})
     worktree_path = impl.get("worktree_path")
@@ -2163,6 +2230,28 @@ def cmd_revise(args: argparse.Namespace) -> None:
 
     candidates = _check_pr_states(candidates)
 
+    # Re-entry: clear ready_notified_at if there's new feedback so we revise again
+    for t in candidates:
+        if not t.get("ready_notified_at"):
+            continue
+        prs = t.get("pull_requests", {})
+        has_new_feedback = False
+        for pr_info in prs.values():
+            url = pr_info.get("url", "") if isinstance(pr_info, dict) else ""
+            if not url:
+                continue
+            if fetch_pr_comments(url):
+                has_new_feedback = True
+                break
+            ci_status, _ = check_pr_ci_status(url)
+            if ci_status == "failing":
+                has_new_feedback = True
+                break
+        if has_new_feedback:
+            log(f"New feedback after ready notification — re-entering revision", issue=t["issue_id"])
+            t["ready_notified_at"] = None
+            save_tracking(t["issue_id"], t)
+
     max_revisions = getattr(args, "max_revisions", None)
     if max_revisions is not None:
         before = len(candidates)
@@ -2198,6 +2287,185 @@ def cmd_revise(args: argparse.Namespace) -> None:
 
     elapsed = time.monotonic() - t0
     log(f"Revision complete in {_fmt_duration(elapsed)}")
+
+
+READY_COOLDOWN_MINUTES = int(os.environ.get("READY_COOLDOWN_MINUTES", "60"))
+
+
+def _post_pr_comment_with_eyes(pr_url: str, body: str, issue_id: str = "") -> bool:
+    """Post a comment on a PR and immediately add :eyes: reaction so revise skips it."""
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        return False
+    owner, repo, number = parsed
+
+    result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/issues/{number}/comments", "-f", f"body={body}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log(f"Failed to post PR comment: {result.stderr.strip()}", issue=issue_id)
+        return False
+
+    try:
+        comment_data = json.loads(result.stdout)
+        comment_id = comment_data.get("id")
+        if comment_id:
+            react_to_pr_comments(pr_url, [comment_id], issue_id=issue_id)
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+    return True
+
+
+def _get_latest_pr_comment_time(pr_url: str) -> str | None:
+    """Get the ISO timestamp of the most recent comment on a PR (threads + issue comments)."""
+    parsed = _parse_pr_url(pr_url)
+    if not parsed:
+        return None
+    owner, repo, number = parsed
+
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          comments(last: 1) {
+            nodes { createdAt }
+          }
+          reviews(last: 1) {
+            nodes { createdAt }
+          }
+        }
+      }
+    }
+    """
+    result = subprocess.run(
+        ["gh", "api", "graphql",
+         "-f", f"query={query}",
+         "-F", f"owner={owner}",
+         "-F", f"repo={repo}",
+         "-F", f"number={number}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+        pr = data["data"]["repository"]["pullRequest"]
+        timestamps = []
+        for c in pr.get("comments", {}).get("nodes", []):
+            if c.get("createdAt"):
+                timestamps.append(c["createdAt"])
+        for r in pr.get("reviews", {}).get("nodes", []):
+            if r.get("createdAt"):
+                timestamps.append(r["createdAt"])
+        return max(timestamps) if timestamps else None
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def _is_pr_ready(pr_url: str, issue_id: str = "") -> bool:
+    """Check if a PR is ready: CI passing, no unresolved threads, no recent comments."""
+    ci_status, _ = check_pr_ci_status(pr_url)
+    if ci_status != "passing":
+        log(f"PR not ready: CI is {ci_status}", issue=issue_id)
+        return False
+
+    comments = fetch_pr_comments(pr_url)
+    if comments:
+        log(f"PR not ready: {len(comments)} unresolved comment(s)", issue=issue_id)
+        return False
+
+    latest = _get_latest_pr_comment_time(pr_url)
+    if latest:
+        try:
+            latest_dt = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+            age_minutes = (datetime.now(timezone.utc) - latest_dt).total_seconds() / 60
+            if age_minutes < READY_COOLDOWN_MINUTES:
+                log(f"PR not ready: last comment {int(age_minutes)}m ago (cooldown: {READY_COOLDOWN_MINUTES}m)", issue=issue_id)
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    return True
+
+
+def cmd_notify_ready(args: argparse.Namespace) -> None:
+    """Check pushed PRs for readiness and tag reviewer when ready."""
+    tracked = load_all_tracking()
+
+    if args.issue_ids:
+        candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
+    else:
+        candidates = [t for t in tracked.values() if t["status"] == "pushed"]
+
+    candidates = _check_pr_states(candidates)
+
+    if not candidates:
+        log("No pushed issues to check for readiness.")
+        return
+
+    notified = 0
+    for t in candidates:
+        issue_id = t["issue_id"]
+
+        if t.get("ready_notified_at"):
+            continue
+
+        prs = t.get("pull_requests", {})
+        pr_urls = [pr.get("url") for pr in prs.values() if pr and pr.get("url")]
+        if not pr_urls:
+            continue
+
+        all_ready = all(_is_pr_ready(url, issue_id=issue_id) for url in pr_urls)
+        if not all_ready:
+            continue
+
+        log(f"All PRs ready — notifying reviewer", issue=issue_id)
+        for url in pr_urls:
+            _post_pr_comment_with_eyes(
+                url,
+                "🏐 @david-nominal this PR is ready for review.",
+                issue_id=issue_id,
+            )
+
+        t["ready_notified_at"] = now_iso()
+        save_tracking(issue_id, t)
+        notified += 1
+
+    log(f"Notified {notified} issue(s) as ready for review.")
+
+
+def cmd_sweep(args: argparse.Namespace) -> None:
+    """Full automated sweep: triage → implement → revise → notify_ready."""
+    log("=" * 60)
+    log("SWEEP: Stage 1/4 — Triage")
+    log("=" * 60)
+    cmd_triage(args)
+
+    log("=" * 60)
+    log("SWEEP: Stage 2/4 — Implement")
+    log("=" * 60)
+    cmd_implement(args)
+
+    log("=" * 60)
+    log("SWEEP: Stage 3/4 — Revise")
+    log("=" * 60)
+    revise_args = argparse.Namespace(
+        issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
+        workers=getattr(args, "workers", DEFAULT_WORKERS),
+    )
+    cmd_revise(revise_args)
+
+    log("=" * 60)
+    log("SWEEP: Stage 4/4 — Notify Ready")
+    log("=" * 60)
+    notify_args = argparse.Namespace(issue_ids=[])
+    cmd_notify_ready(notify_args)
+
+    log("=" * 60)
+    log("SWEEP complete.")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
@@ -2272,6 +2540,17 @@ def main():
     p_retry.add_argument("issue_ids", nargs="*", help="Issue identifiers to retry (default: all failed)")
     _add_workers_arg(p_retry)
     p_retry.set_defaults(func=cmd_retry)
+
+    p_sweep = sub.add_parser("sweep", help="Full automated sweep: triage → implement → revise → notify_ready")
+    p_sweep.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
+                         help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
+    _add_workers_arg(p_sweep)
+    p_sweep.set_defaults(func=cmd_sweep)
+
+    p_notify = sub.add_parser("notify_ready", help="Check pushed PRs and notify reviewer when ready")
+    p_notify.add_argument("issue_ids", nargs="*", help="Issue identifiers to check (default: all pushed)")
+    p_notify.set_defaults(func=cmd_notify_ready)
 
     p_show = sub.add_parser("show", help="Show full details for an issue")
     p_show.add_argument("issue_id", help="Issue identifier")

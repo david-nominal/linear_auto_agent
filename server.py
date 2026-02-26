@@ -20,7 +20,7 @@ LOGS_DIR = DATA_DIR / "logs"
 UI_FILE = BASE_DIR / "ui.html"
 SCHEDULES_FILE = DATA_DIR / "schedules.json"
 
-SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry")
+SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep", "notify_ready")
 
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
@@ -358,7 +358,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/jobs/"):
             command = path.split("/")[3]
-            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification"):
+            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification", "sweep", "notify_ready"):
                 self._json_response({"error": f"unknown command: {command}"}, 400)
                 return
             body = self._read_body()

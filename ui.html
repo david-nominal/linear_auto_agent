@@ -39,6 +39,10 @@
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
   .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
   .badge-asked_clarification { background: #3d2e00; color: var(--yellow); }
+  .badge-ready { background: #1a3826; color: var(--green); border: 1px solid var(--green); }
+  .badge-ci-passing { background: #1a3826; color: var(--green); font-size: 11px; }
+  .badge-ci-failing { background: #3d1416; color: var(--red); font-size: 11px; }
+  .badge-ci-pending { background: #21262d; color: var(--gray); font-size: 11px; }
 
   /* Table */
   table { width: 100%; border-collapse: collapse; }
@@ -164,6 +168,24 @@
         <button class="btn btn-blue btn-sm" onclick="launchRevise()" style="width:100%">Run Revise</button>
       </div>
     </div>
+    <div class="cmd-group">
+      <button class="btn" id="btn-sweep" onclick="toggleCmd('sweep')" style="background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Sweep ▾</button>
+      <div class="cmd-dropdown" id="cmd-sweep">
+        <label>Limit (max triage)</label>
+        <input type="number" id="sweep-limit" placeholder="all" min="1">
+        <label>Workers</label>
+        <input type="number" id="sweep-workers" value="3" min="1" max="10">
+        <label>Schedule</label>
+        <div class="sched-row">
+          <span>Every</span>
+          <input type="number" id="sched-sweep-val" min="1" value="30">
+          <select id="sched-sweep-unit"><option value="60" selected>min</option><option value="3600">hr</option></select>
+          <button class="btn btn-sm" id="sched-sweep-btn" onclick="toggleSchedule('sweep')">Enable</button>
+        </div>
+        <button class="btn btn-sm" onclick="launchSweep()" style="width:100%;background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Run Sweep</button>
+      </div>
+    </div>
+    <button class="btn btn-sm" onclick="runJob('notify_ready')" title="Check PRs and notify reviewer">Notify Ready</button>
     <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
       Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
     </button>
@@ -255,7 +277,7 @@ function render() {
 
     html += `<tr class="row ${isExpanded ? 'expanded' : ''}" onclick="toggleDetail('${t.issue_id}')">
       <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
-      <td><span class="badge badge-${t.status}">${t.status}</span>${t.revision_count ? ` <span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
+      <td><span class="badge badge-${t.status}">${t.status}</span>${t.ready_notified_at ? ' <span class="badge badge-ready" title="Reviewer notified ' + shortDate(t.ready_notified_at) + '">ready</span>' : ''}${t.revision_count ? ` <span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
       <td>${complexity}</td>
       <td class="repos">${repos}</td>
       <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
@@ -312,6 +334,7 @@ function renderDetail(t) {
       ${t.revision_count ? `<span>Revisions: ${t.revision_count}</span>` : ''}
       ${t.completed_at ? `<span>Completed: ${shortDate(t.completed_at)}</span>` : ''}
       ${t.canceled_at ? `<span>Canceled: ${shortDate(t.canceled_at)}</span>` : ''}
+      ${t.ready_notified_at ? `<span style="color:var(--green)">Reviewer notified: ${shortDate(t.ready_notified_at)}</span>` : ''}
       ${prHtml}
       <span id="log-links-${t.issue_id}" style="display:contents"></span>
       <span style="margin-left:auto;display:flex;gap:6px">
@@ -437,6 +460,14 @@ function launchRevise() {
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('revise', args);
 }
+function launchSweep() {
+  const args = [];
+  const limit = document.getElementById('sweep-limit').value;
+  const workers = document.getElementById('sweep-workers').value;
+  if (limit) args.push('--limit', limit);
+  if (workers && workers !== '3') args.push('--workers', workers);
+  closeAllCmds(); runJob('sweep', args);
+}
 
 let schedules = {};
 
@@ -444,7 +475,7 @@ async function fetchSchedules() {
   try {
     const res = await fetch(API + '/api/schedules');
     schedules = await res.json();
-    for (const cmd of ['triage', 'implement', 'revise']) {
+    for (const cmd of ['triage', 'implement', 'revise', 'sweep']) {
       const sched = schedules[cmd];
       const btn = document.getElementById('sched-' + cmd + '-btn');
       const headerBtn = document.getElementById('btn-' + cmd);
@@ -489,6 +520,11 @@ function getSchedArgs(cmd) {
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'revise') {
     const workers = document.getElementById('revise-workers').value;
+    if (workers && workers !== '3') args.push('--workers', workers);
+  } else if (cmd === 'sweep') {
+    const limit = document.getElementById('sweep-limit').value;
+    const workers = document.getElementById('sweep-workers').value;
+    if (limit) args.push('--limit', limit);
     if (workers && workers !== '3') args.push('--workers', workers);
   }
   return args;
