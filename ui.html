@@ -127,6 +127,8 @@
       <div class="cmd-dropdown" id="cmd-triage">
         <label>Limit (max issues)</label>
         <input type="number" id="triage-limit" placeholder="all" min="1">
+        <label>Max age (days)</label>
+        <input type="number" id="triage-max-age" value="30" min="1">
         <label>Workers</label>
         <input type="number" id="triage-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -178,6 +180,8 @@
       <div class="cmd-dropdown" id="cmd-sweep">
         <label>Limit (max triage)</label>
         <input type="number" id="sweep-limit" placeholder="all" min="1">
+        <label>Max age (days)</label>
+        <input type="number" id="sweep-max-age" value="30" min="1">
         <label>Workers</label>
         <input type="number" id="sweep-workers" value="3" min="1" max="10">
         <label>Schedule</label>
@@ -448,8 +452,10 @@ document.addEventListener('click', e => { if (!e.target.closest('.cmd-group')) c
 function launchTriage() {
   const args = [];
   const limit = document.getElementById('triage-limit').value;
+  const maxAge = document.getElementById('triage-max-age').value;
   const workers = document.getElementById('triage-workers').value;
   if (limit) args.push('--limit', limit);
+  if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('triage', args);
 }
@@ -472,8 +478,10 @@ function launchRevise() {
 function launchSweep() {
   const args = [];
   const limit = document.getElementById('sweep-limit').value;
+  const maxAge = document.getElementById('sweep-max-age').value;
   const workers = document.getElementById('sweep-workers').value;
   if (limit) args.push('--limit', limit);
+  if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('sweep', args);
 }
@@ -521,8 +529,10 @@ function getSchedArgs(cmd) {
   const args = [];
   if (cmd === 'triage') {
     const limit = document.getElementById('triage-limit').value;
+    const maxAge = document.getElementById('triage-max-age').value;
     const workers = document.getElementById('triage-workers').value;
     if (limit) args.push('--limit', limit);
+    if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'implement') {
     const limit = document.getElementById('impl-limit').value;
@@ -536,8 +546,10 @@ function getSchedArgs(cmd) {
     if (workers && workers !== '3') args.push('--workers', workers);
   } else if (cmd === 'sweep') {
     const limit = document.getElementById('sweep-limit').value;
+    const maxAge = document.getElementById('sweep-max-age').value;
     const workers = document.getElementById('sweep-workers').value;
     if (limit) args.push('--limit', limit);
+    if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
     if (workers && workers !== '3') args.push('--workers', workers);
   }
   return args;

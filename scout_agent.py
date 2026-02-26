@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -252,8 +252,13 @@ def linear_api_key() -> str:
     return key
 
 
-def fetch_issues() -> list[dict]:
+DEFAULT_MAX_AGE_DAYS = 30
+
+
+def fetch_issues(max_age_days: int | None = None) -> list[dict]:
     """Fetch all open issues that are not started, completed, canceled, or duplicates."""
+    age = max_age_days if max_age_days is not None else DEFAULT_MAX_AGE_DAYS
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=age)).strftime("%Y-%m-%dT%H:%M:%SZ")
     query = """
     query($cursor: String) {
         issues(
@@ -264,6 +269,7 @@ def fetch_issues() -> list[dict]:
                     type: { nin: ["started", "completed", "canceled"] }
                 }
                 hasDuplicateRelations: { eq: false }
+                updatedAt: { gte: "%s" }
             }
             orderBy: updatedAt
         ) {
@@ -280,7 +286,7 @@ def fetch_issues() -> list[dict]:
             }
         }
     }
-    """
+    """ % cutoff
     headers = {"Authorization": linear_api_key(), "Content-Type": "application/json"}
     all_issues = []
     cursor = None
@@ -1435,9 +1441,10 @@ def cmd_triage(args: argparse.Namespace) -> None:
     workspace = str(ensure_workspace())
     _fetch_repos()
 
+    max_age = getattr(args, "max_age_days", None)
     log("Fetching issues from Linear...")
-    issues = fetch_issues()
-    log(f"Found {len(issues)} open issues")
+    issues = fetch_issues(max_age_days=max_age)
+    log(f"Found {len(issues)} open issues (max age: {max_age or DEFAULT_MAX_AGE_DAYS}d)")
 
     tracked = load_all_tracking()
     untracked = [i for i in issues if i["id"] not in tracked]
@@ -2507,6 +2514,7 @@ def main():
 
     p_triage = sub.add_parser("triage", help="Fetch and triage open Linear issues")
     p_triage.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_triage.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     _add_workers_arg(p_triage)
     p_triage.set_defaults(func=cmd_triage)
 
@@ -2531,6 +2539,7 @@ def main():
 
     p_run = sub.add_parser("run", help="Full cycle: triage then implement approved")
     p_run.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_run.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_run.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                        help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_run)
@@ -2558,6 +2567,7 @@ def main():
 
     p_sweep = sub.add_parser("sweep", help="Full automated sweep: triage → implement → revise → notify_ready")
     p_sweep.add_argument("--limit", type=int, default=None, help="Max issues to triage")
+    p_sweep.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
                          help=f"Max self-review revision cycles (default: {DEFAULT_MAX_REVIEW_REVISIONS})")
     _add_workers_arg(p_sweep)
