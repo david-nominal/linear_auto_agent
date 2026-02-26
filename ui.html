@@ -272,6 +272,15 @@ function render() {
   if (!issues.length) { tbody.innerHTML = ''; empty.style.display = ''; empty.textContent = 'No tracked issues. Run triage first.'; return; }
   empty.style.display = 'none';
 
+  const scrollPositions = {};
+  tbody.querySelectorAll('.detail-row pre, .detail-row textarea').forEach(el => {
+    if (el.scrollTop > 0) {
+      const id = el.id || el.closest('.detail-row')?.previousElementSibling?.querySelector('.issue-id')?.textContent;
+      const tag = el.tagName + (el.id ? '#' + el.id : '');
+      if (id) scrollPositions[id + ':' + tag] = el.scrollTop;
+    }
+  });
+
   let html = '';
   for (const t of issues) {
     const isExpanded = expandedId === t.issue_id;
@@ -306,6 +315,13 @@ function render() {
     }
   }
   tbody.innerHTML = html;
+
+  tbody.querySelectorAll('.detail-row pre, .detail-row textarea').forEach(el => {
+    const id = el.id || el.closest('.detail-row')?.previousElementSibling?.querySelector('.issue-id')?.textContent;
+    const tag = el.tagName + (el.id ? '#' + el.id : '');
+    const key = id + ':' + tag;
+    if (scrollPositions[key]) el.scrollTop = scrollPositions[key];
+  });
 }
 
 function renderDetail(t) {
