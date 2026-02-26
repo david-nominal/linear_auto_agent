@@ -1705,6 +1705,11 @@ def cmd_implement(args: argparse.Namespace) -> None:
     else:
         approved = [t for t in tracked.values() if t["status"] == "approved"]
 
+    limit = getattr(args, "limit", None)
+    if limit:
+        approved = approved[:limit]
+        log(f"Limited to {limit} issues")
+
     if not approved:
         log("No approved issues to implement. Run 'approve <issue-id>' first.")
         return
@@ -2257,6 +2262,11 @@ def cmd_revise(args: argparse.Namespace) -> None:
         if skipped:
             log(f"Skipped {skipped} issue(s) already at {max_revisions}+ revisions")
 
+    limit = getattr(args, "limit", None)
+    if limit:
+        candidates = candidates[:limit]
+        log(f"Limited to {limit} issues")
+
     if not candidates:
         log("No pushed issues with PRs to revise.")
         return
@@ -2399,6 +2409,11 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
 
     candidates = _check_pr_states(candidates)
 
+    limit = getattr(args, "limit", None)
+    if limit:
+        candidates = candidates[:limit]
+        log(f"Limited to {limit} issues")
+
     if not candidates:
         log("No pushed issues to check for readiness.")
         return
@@ -2452,13 +2467,14 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     revise_args = argparse.Namespace(
         issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
         workers=getattr(args, "workers", DEFAULT_WORKERS),
+        limit=getattr(args, "limit", None),
     )
     cmd_revise(revise_args)
 
     log("=" * 60)
     log("SWEEP: Stage 4/4 — Notify Ready")
     log("=" * 60)
-    notify_args = argparse.Namespace(issue_ids=[])
+    notify_args = argparse.Namespace(issue_ids=[], limit=getattr(args, "limit", None))
     cmd_notify_ready(notify_args)
 
     log("=" * 60)
