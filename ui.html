@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏐</text></svg>">
+<title>Spiky</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #21262d; --border: #30363d;
+    --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
+    --yellow: #d29922; --blue: #58a6ff; --green: #3fb950; --purple: #bc8cff;
+    --red: #f85149; --gray: #8b949e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  .header-actions { display: flex; gap: 8px; margin-left: auto; }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s; }
+  .btn:hover { background: var(--border); }
+  .btn-primary { background: #238636; border-color: #2ea043; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-sm { padding: 3px 10px; font-size: 12px; }
+  .btn-yellow { background: #5c4813; border-color: var(--yellow); color: var(--yellow); }
+  .btn-blue { background: #1a3a5c; border-color: var(--blue); color: var(--blue); }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+
+  /* Status badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+  .badge-awaiting_approval { background: #3d2e00; color: var(--yellow); }
+  .badge-approved { background: #1a3a5c; color: var(--blue); }
+  .badge-implemented { background: #1a3826; color: var(--green); }
+  .badge-pushed { background: #2a1a4e; color: var(--purple); }
+  .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
+  .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: top; }
+  tr.row { cursor: pointer; transition: background 0.1s; }
+  tr.row:hover { background: var(--surface); }
+  tr.row.expanded { background: var(--surface); }
+  .issue-id { font-weight: 600; color: var(--accent); text-decoration: none; }
+  .issue-id:hover { text-decoration: underline; }
+  .summary { color: var(--text2); max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .repos { font-size: 12px; color: var(--text2); }
+  .actions-cell { white-space: nowrap; }
+
+  /* Detail panel (inline row) */
+  tr.detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
+  .detail { background: var(--surface); padding: 20px 24px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .detail-section h3 { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .detail-section pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; color: var(--text); }
+  .detail-section textarea { width: 100%; min-height: 200px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 13px; color: var(--text); font-family: monospace; resize: vertical; }
+  .detail-meta { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; color: var(--text2); }
+  .detail-meta a { color: var(--accent); text-decoration: none; }
+  .detail-meta a:hover { text-decoration: underline; }
+  .detail-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .impl-table { width: 100%; font-size: 13px; margin-top: 4px; }
+  .impl-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+
+  /* Jobs panel */
+  .jobs-toggle { position: relative; }
+  .jobs-badge { position: absolute; top: -4px; right: -4px; background: var(--blue); color: #fff; font-size: 10px; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .jobs-panel { position: fixed; right: 0; top: 49px; bottom: 0; width: 480px; background: var(--surface); border-left: 1px solid var(--border); z-index: 90; transform: translateX(100%); transition: transform 0.2s; overflow-y: auto; }
+  .jobs-panel.open { transform: translateX(0); }
+  .jobs-panel-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .jobs-panel-header h2 { font-size: 14px; }
+  .job-card { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .job-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 13px; }
+  .job-card pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: var(--text2); }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Fullscreen overlay */
+  .fullscreen-overlay { position: fixed; inset: 0; z-index: 200; background: var(--bg); overflow-y: auto; display: none; }
+  .fullscreen-overlay.open { display: block; }
+  .fullscreen-header { position: sticky; top: 0; background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; z-index: 201; }
+  .fullscreen-header h2 { font-size: 15px; font-weight: 600; }
+  .fullscreen-body { padding: 24px 40px; }
+  .fullscreen-body .detail { padding: 0; background: transparent; }
+  .fullscreen-body .detail-grid { grid-template-columns: 1fr 1fr; }
+  .fullscreen-body .detail-section pre { max-height: none; font-size: 14px; }
+  .fullscreen-body .detail-section textarea { min-height: 60vh; font-size: 14px; }
+
+  /* Command dropdowns */
+  .cmd-group { position: relative; display: inline-block; }
+  .cmd-dropdown { display: none; position: absolute; top: 100%; right: 0; margin-top: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; min-width: 200px; z-index: 110; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .cmd-dropdown.open { display: block; }
+  .cmd-dropdown label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+  .cmd-dropdown input { width: 100%; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; margin-bottom: 8px; }
+  .cmd-dropdown .cmd-row { display: flex; gap: 8px; align-items: center; }
+
+  .empty { text-align: center; padding: 60px 20px; color: var(--text2); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🏐 Spiky</h1>
+  <div class="header-actions">
+    <div class="cmd-group">
+      <button class="btn btn-yellow" onclick="toggleCmd('triage')">Triage ▾</button>
+      <div class="cmd-dropdown" id="cmd-triage">
+        <label>Limit (max issues)</label>
+        <input type="number" id="triage-limit" placeholder="all" min="1">
+        <label>Workers</label>
+        <input type="number" id="triage-workers" value="3" min="1" max="10">
+        <button class="btn btn-yellow btn-sm" onclick="launchTriage()" style="width:100%">Run Triage</button>
+      </div>
+    </div>
+    <div class="cmd-group">
+      <button class="btn btn-primary" onclick="toggleCmd('implement')">Implement ▾</button>
+      <div class="cmd-dropdown" id="cmd-implement">
+        <label>Workers</label>
+        <input type="number" id="impl-workers" value="3" min="1" max="10">
+        <button class="btn btn-primary btn-sm" onclick="launchImpl()" style="width:100%">Run Implement</button>
+      </div>
+    </div>
+    <div class="cmd-group">
+      <button class="btn btn-blue" onclick="toggleCmd('revise')">Revise ▾</button>
+      <div class="cmd-dropdown" id="cmd-revise">
+        <label>Workers</label>
+        <input type="number" id="revise-workers" value="3" min="1" max="10">
+        <button class="btn btn-blue btn-sm" onclick="launchRevise()" style="width:100%">Run Revise</button>
+      </div>
+    </div>
+    <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
+      Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
+    </button>
+  </div>
+</header>
+
+<div class="container">
+  <table>
+    <thead>
+      <tr>
+        <th>Issue</th>
+        <th>Status</th>
+        <th>Complexity</th>
+        <th>Repos</th>
+        <th>Summary</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="issueTableBody">
+    </tbody>
+  </table>
+  <div class="empty" id="emptyState">Loading...</div>
+</div>
+
+<div class="fullscreen-overlay" id="fullscreenOverlay">
+  <div class="fullscreen-header">
+    <h2 id="fullscreenTitle"></h2>
+    <button class="btn btn-sm" onclick="closeFullscreen()">Close (Esc)</button>
+  </div>
+  <div class="fullscreen-body" id="fullscreenBody"></div>
+</div>
+
+<div class="jobs-panel" id="jobsPanel">
+  <div class="jobs-panel-header">
+    <h2>Jobs</h2>
+    <button class="btn btn-sm" onclick="toggleJobs()">Close</button>
+  </div>
+  <div id="jobsList"></div>
+</div>
+
+<script>
+const API = '';
+let issues = [];
+let expandedId = null;
+let jobsPanelOpen = false;
+let refreshTimer = null;
+let jobsTimer = null;
+let runningIssues = new Set();
+
+async function fetchIssues() {
+  try {
+    const [issuesRes, jobsRes] = await Promise.all([
+      fetch(API + '/api/issues'),
+      fetch(API + '/api/jobs'),
+    ]);
+    issues = await issuesRes.json();
+    const jobs = await jobsRes.json();
+    runningIssues = new Set();
+    for (const j of jobs) {
+      if (j.finished_at !== null) continue;
+      for (const a of j.args || []) {
+        if (/^[A-Z]+-\d+$/.test(a)) runningIssues.add(a);
+      }
+    }
+    render();
+  } catch(e) {
+    document.getElementById('emptyState').textContent = 'Failed to connect to server.';
+  }
+}
+
+function render() {
+  const tbody = document.getElementById('issueTableBody');
+  const empty = document.getElementById('emptyState');
+  if (!issues.length) { tbody.innerHTML = ''; empty.style.display = ''; empty.textContent = 'No tracked issues. Run triage first.'; return; }
+  empty.style.display = 'none';
+
+  let html = '';
+  for (const t of issues) {
+    const isExpanded = expandedId === t.issue_id;
+    const repos = (t.repos || []).join(', ') || '-';
+    const complexity = t.decision || '-';
+    let summary = '';
+    if (t.status === 'awaiting_approval') summary = (t.plan_summary || t.plan || '').replace(/\n/g, ' ');
+    else if (t.reasoning) summary = t.reasoning;
+    const impls = t.implementations || {};
+    const branches = Object.values(impls).filter(v => v && v.worktree_branch).map(v => v.worktree_branch);
+    if (branches.length) summary = '[' + branches.join(', ') + '] ' + summary;
+
+    html += `<tr class="row ${isExpanded ? 'expanded' : ''}" onclick="toggleDetail('${t.issue_id}')">
+      <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
+      <td><span class="badge badge-${t.status}">${t.status}</span></td>
+      <td>${complexity}</td>
+      <td class="repos">${repos}</td>
+      <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
+      <td class="actions-cell">${runningIssues.has(t.issue_id)
+        ? '<span class="spinner"></span> <span style="font-size:12px;color:var(--text2)">running</span>'
+        : `${t.status === 'awaiting_approval' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); approve('${t.issue_id}')">Approve</button>` : ''}
+        ${t.status === 'approved' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('implement','${t.issue_id}')">Implement</button>` : ''}
+        ${t.status === 'pushed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('revise','${t.issue_id}')">Revise</button>` : ''}
+        ${t.status === 'implemented' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('push','${t.issue_id}')">Push</button>` : ''}
+        ${t.status === 'failed' ? `<button class="btn btn-sm" onclick="event.stopPropagation(); runJobFor('retry','${t.issue_id}')">Retry</button>` : ''}`}
+      </td>
+    </tr>`;
+
+    if (isExpanded) {
+      html += `<tr class="detail-row"><td colspan="6">${renderDetail(t)}</td></tr>`;
+    }
+  }
+  tbody.innerHTML = html;
+}
+
+function renderDetail(t) {
+  const canEdit = t.status === 'awaiting_approval';
+  const plan = t.plan || '(no plan)';
+  const planSummary = t.plan_summary || '';
+
+  let implHtml = '';
+  const impls = t.implementations || {};
+  if (Object.keys(impls).length) {
+    implHtml = '<table class="impl-table"><tr><td><b>Repo</b></td><td><b>Branch</b></td><td><b>Exit</b></td><td><b>Duration</b></td></tr>';
+    for (const [repo, v] of Object.entries(impls)) {
+      if (!v) continue;
+      const duration = v.started_at && v.completed_at ? timeDiff(v.started_at, v.completed_at) : '-';
+      const exit = v.exit_code != null ? (v.exit_code === 0 ? '✓' : '✗ ' + v.exit_code) : '-';
+      const logLink = v.output_log ? `<a href="/api/logs/${encodeURIComponent(v.output_log.split('/').pop())}" target="_blank">log</a>` : '';
+      implHtml += `<tr><td>${repo}</td><td><code>${v.worktree_branch || '-'}</code></td><td>${exit} ${logLink}</td><td>${duration}</td></tr>`;
+    }
+    implHtml += '</table>';
+  }
+
+  let prHtml = '';
+  const prs = t.pull_requests || {};
+  for (const [repo, pr] of Object.entries(prs)) {
+    if (pr && pr.url) prHtml += `<a href="${pr.url}" target="_blank">${repo} PR</a> `;
+  }
+
+  return `<div class="detail">
+    <div class="detail-meta">
+      ${t.url ? `<a href="${t.url}" target="_blank">Linear Issue</a>` : ''}
+      ${t.team ? `<span>Team: ${t.team}</span>` : ''}
+      ${(t.labels||[]).length ? `<span>Labels: ${t.labels.join(', ')}</span>` : ''}
+      ${t.triaged_at ? `<span>Triaged: ${shortDate(t.triaged_at)}</span>` : ''}
+      ${t.approved_at ? `<span>Approved: ${shortDate(t.approved_at)}</span>` : ''}
+      ${prHtml}
+      <button class="btn btn-sm" onclick="event.stopPropagation(); openFullscreen('${t.issue_id}')" style="margin-left:auto">Expand</button>
+    </div>
+    ${t.description ? `<div class="detail-section"><h3>Description</h3><pre>${esc(t.description)}</pre></div>` : ''}
+    ${t.reasoning ? `<div class="detail-section" style="margin-top:12px"><h3>Reasoning</h3><pre>${esc(t.reasoning)}</pre></div>` : ''}
+    <div class="detail-grid" style="margin-top:12px">
+      <div class="detail-section">
+        <h3>Plan ${canEdit ? '(editable)' : ''}</h3>
+        ${canEdit
+          ? `<textarea id="plan-${t.issue_id}" onfocus="pauseRefresh()" onblur="resumeRefresh()">${esc(plan)}</textarea>`
+          : `<pre>${esc(plan)}</pre>`}
+      </div>
+      <div class="detail-section">
+        <h3>Plan Summary ${canEdit ? '(editable)' : ''}</h3>
+        ${canEdit
+          ? `<textarea id="plansum-${t.issue_id}" style="min-height:80px" onfocus="pauseRefresh()" onblur="resumeRefresh()">${esc(planSummary)}</textarea>`
+          : `<pre>${esc(planSummary || '(none)')}</pre>`}
+        ${implHtml ? '<h3 style="margin-top:16px">Implementations</h3>' + implHtml : ''}
+      </div>
+    </div>
+    ${canEdit ? `<div class="detail-actions">
+      <button class="btn" onclick="event.stopPropagation(); savePlan('${t.issue_id}')">Save Plan</button>
+      <button class="btn btn-primary" onclick="event.stopPropagation(); savePlanAndApprove('${t.issue_id}')">Save &amp; Approve</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function toggleDetail(id) { expandedId = expandedId === id ? null : id; render(); }
+
+let fullscreenId = null;
+function openFullscreen(id) {
+  fullscreenId = id;
+  const t = issues.find(i => i.issue_id === id);
+  if (!t) return;
+  document.getElementById('fullscreenTitle').textContent = t.issue_id + ' — ' + (t.title || '');
+  document.getElementById('fullscreenBody').innerHTML = renderDetail(t);
+  document.getElementById('fullscreenOverlay').classList.add('open');
+  pauseRefresh();
+}
+function closeFullscreen() {
+  fullscreenId = null;
+  document.getElementById('fullscreenOverlay').classList.remove('open');
+  resumeRefresh();
+  fetchIssues();
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && fullscreenId) closeFullscreen(); });
+
+async function approve(issueId) {
+  if (!confirm('Approve ' + issueId + '?')) return;
+  await fetch(API + '/api/issues/' + issueId + '/approve', { method: 'POST' });
+  await fetchIssues();
+}
+
+async function savePlan(issueId) {
+  const plan = document.getElementById('plan-' + issueId)?.value;
+  const planSummary = document.getElementById('plansum-' + issueId)?.value;
+  await fetch(API + '/api/issues/' + issueId + '/plan', {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ plan, plan_summary: planSummary }),
+  });
+  await fetchIssues();
+}
+
+async function savePlanAndApprove(issueId) {
+  await savePlan(issueId);
+  await fetch(API + '/api/issues/' + issueId + '/approve', { method: 'POST' });
+  await fetchIssues();
+}
+
+let openCmd = null;
+function toggleCmd(name) {
+  if (openCmd === name) { document.getElementById('cmd-' + name).classList.remove('open'); openCmd = null; return; }
+  if (openCmd) document.getElementById('cmd-' + openCmd).classList.remove('open');
+  document.getElementById('cmd-' + name).classList.add('open');
+  openCmd = name;
+}
+function closeAllCmds() { if (openCmd) { document.getElementById('cmd-' + openCmd).classList.remove('open'); openCmd = null; } }
+document.addEventListener('click', e => { if (!e.target.closest('.cmd-group')) closeAllCmds(); });
+
+function launchTriage() {
+  const args = [];
+  const limit = document.getElementById('triage-limit').value;
+  const workers = document.getElementById('triage-workers').value;
+  if (limit) args.push('--limit', limit);
+  if (workers && workers !== '3') args.push('--workers', workers);
+  closeAllCmds(); runJob('triage', args);
+}
+function launchImpl() {
+  const args = [];
+  const workers = document.getElementById('impl-workers').value;
+  if (workers && workers !== '3') args.push('--workers', workers);
+  closeAllCmds(); runJob('implement', args);
+}
+function launchRevise() {
+  const args = [];
+  const workers = document.getElementById('revise-workers').value;
+  if (workers && workers !== '3') args.push('--workers', workers);
+  closeAllCmds(); runJob('revise', args);
+}
+
+async function runJob(command, args) {
+  const opts = { method: 'POST' };
+  if (args) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify({args}); }
+  const res = await fetch(API + '/api/jobs/' + command, opts);
+  const data = await res.json();
+  if (data.ok) { if (!jobsPanelOpen) toggleJobs(); pollJobs(); }
+}
+
+function runJobFor(command, issueId) {
+  runJob(command, [issueId]);
+}
+
+async function killJob(jobId) {
+  await fetch(API + '/api/jobs/' + jobId + '/kill', { method: 'POST' });
+  pollJobs();
+}
+
+function toggleJobs() {
+  jobsPanelOpen = !jobsPanelOpen;
+  document.getElementById('jobsPanel').classList.toggle('open', jobsPanelOpen);
+  if (jobsPanelOpen) pollJobs();
+}
+
+async function pollJobs() {
+  try {
+    const res = await fetch(API + '/api/jobs');
+    const jobs = await res.json();
+    const running = jobs.filter(j => j.finished_at === null).length;
+    const badge = document.getElementById('jobsBadge');
+    if (running > 0) { badge.style.display = ''; badge.textContent = running; } else { badge.style.display = 'none'; }
+
+    const list = document.getElementById('jobsList');
+    if (!jobs.length) { list.innerHTML = '<div style="padding:20px;color:var(--text2);text-align:center">No jobs yet</div>'; return; }
+
+    list.innerHTML = jobs.slice().reverse().map(j => {
+      const isRunning = j.finished_at === null;
+      const status = isRunning ? '<span class="spinner"></span>' : (j.exit_code === 0 ? '✓' : '✗');
+      const args = j.args.length ? ' ' + j.args.join(' ') : '';
+      const killBtn = isRunning ? `<button class="btn btn-sm" style="color:var(--red);border-color:var(--red);margin-left:8px" onclick="killJob('${j.id}')">Kill</button>` : '';
+      return `<div class="job-card">
+        <div class="job-card-header">
+          <span><b>${j.command}${esc(args)}</b></span>
+          <span>${status} ${j.finished_at ? shortDate(j.finished_at) : 'running...'} ${killBtn}</span>
+        </div>
+        <pre>${esc(j.output || '(waiting...)')}</pre>
+      </div>`;
+    }).join('');
+
+    if (running > 0) { clearTimeout(jobsTimer); jobsTimer = setTimeout(pollJobs, 2000); fetchIssues(); }
+  } catch(e) {}
+}
+
+function pauseRefresh() { clearInterval(refreshTimer); refreshTimer = null; }
+function resumeRefresh() { if (!refreshTimer) refreshTimer = setInterval(fetchIssues, 5000); }
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function truncate(s, n) { return s.length > n ? s.slice(0, n) + '...' : s; }
+function shortDate(iso) { if (!iso) return ''; try { return new Date(iso).toLocaleString(); } catch { return iso; } }
+function timeDiff(a, b) { const s = (new Date(b) - new Date(a)) / 1000; return s < 60 ? s.toFixed(0) + 's' : (s/60).toFixed(1) + 'm'; }
+
+fetchIssues();
+refreshTimer = setInterval(fetchIssues, 5000);
+setInterval(() => { if (jobsPanelOpen) pollJobs(); }, 5000);
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linear Auto-Agent: fetch open issues, triage, plan, and implement via cursor agent CLI."""
+"""Spiky: fetch open issues, triage, plan, and implement via cursor agent CLI."""
 
 import argparse
 import json
@@ -1037,7 +1037,11 @@ def _implement_issue(tracking: dict) -> dict:
 
 def cmd_implement(args: argparse.Namespace) -> None:
     tracked = load_all_tracking()
-    approved = [t for t in tracked.values() if t["status"] == "approved"]
+    issue_ids = getattr(args, "issue_ids", None)
+    if issue_ids:
+        approved = [t for t in tracked.values() if t["issue_id"] in issue_ids and t["status"] == "approved"]
+    else:
+        approved = [t for t in tracked.values() if t["status"] == "approved"]
 
     if not approved:
         log("No approved issues to implement. Run 'approve <issue-id>' first.")
@@ -1454,7 +1458,7 @@ def _add_workers_arg(parser: argparse.ArgumentParser) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Linear Auto-Agent: triage, plan, and implement Linear issues via cursor agent",
+        description="Spiky: triage, plan, and implement Linear issues via cursor agent",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1470,7 +1474,8 @@ def main():
     p_approve.add_argument("issue_ids", nargs="+", help="Issue identifiers to approve")
     p_approve.set_defaults(func=cmd_approve)
 
-    p_implement = sub.add_parser("implement", help="Implement all approved issues")
+    p_implement = sub.add_parser("implement", help="Implement approved issues")
+    p_implement.add_argument("issue_ids", nargs="*", help="Issue identifiers to implement (default: all approved)")
     _add_workers_arg(p_implement)
     p_implement.set_defaults(func=cmd_implement)
 

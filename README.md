@@ -1,4 +1,4 @@
-# Linear Auto-Agent
+# Spiky
 
 Automated triage and implementation of Linear issues using Cursor Agent CLI.
 
@@ -47,6 +47,13 @@ Optional model overrides (uses cursor agent's default model if unset):
 # Address PR review feedback (fetches unresolved comments, runs agent, pushes)
 ./run.sh revise                        # all pushed PRs with unresolved comments
 ./run.sh revise ENG-123                # specific issue only
+```
+
+### Web UI
+
+```bash
+uv run server.py
+# Open http://localhost:8111
 ```
 
 ## How it works
