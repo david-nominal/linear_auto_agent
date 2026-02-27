@@ -305,7 +305,7 @@ function render() {
     html += `<tr class="row ${isExpanded ? 'expanded' : ''}" onclick="toggleDetail('${t.issue_id}')">
       <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
       <td>${prLinks || '<span style="color:var(--text2)">-</span>'}</td>
-      <td><span class="badge badge-${t.status}">${t.status}</span>${t.ready_notified_at ? ' <span class="badge badge-ready" title="Reviewer notified ' + shortDate(t.ready_notified_at) + '">ready</span>' : ''}${t.revision_count ? ` <span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
+      <td><span class="badge badge-${t.status}">${t.status}</span>${t.ready_notified_at ? ' <span class="badge badge-ready" title="Reviewer notified ' + shortDate(t.ready_notified_at) + '">ready</span>' : ''}${t.revision_count ? `<br><span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
       <td>${complexity}</td>
       <td class="repos">${repos}</td>
       <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
