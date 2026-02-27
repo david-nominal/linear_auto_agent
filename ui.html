@@ -90,6 +90,15 @@
   .job-card { padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .job-card-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
   .job-card pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--text2); margin-top: 6px; }
+  .job-progress { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--text2); }
+  .job-progress-bar { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; max-width: 200px; }
+  .job-progress-fill { height: 100%; background: var(--green); border-radius: 3px; transition: width 0.3s; }
+  .job-progress-counts { display: flex; gap: 8px; }
+  .job-progress-counts span { display: inline-flex; align-items: center; gap: 3px; }
+  .job-progress-counts .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .dot-done { background: var(--green); }
+  .dot-running { background: var(--blue); }
+  .dot-todo { background: var(--surface2); border: 1px solid var(--border); }
   .job-log-wrap { position: relative; }
   .job-log-wrap.collapsed pre { display: none; }
   .job-log-toggle { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 12px; padding: 2px 0; }
@@ -615,6 +624,35 @@ async function killJob(jobId) {
   pollJobs();
 }
 
+function parseJobProgress(output) {
+  if (!output) return null;
+  const m = output.match(/Progress:\s+(\d+)\/(\d+)/g);
+  if (!m) return null;
+  const last = m[m.length - 1];
+  const [, doneStr, totalStr] = last.match(/Progress:\s+(\d+)\/(\d+)/);
+  const done = parseInt(doneStr), total = parseInt(totalStr);
+  const remaining = total - done;
+  const wm = output.match(/(\d+)\s+worker/);
+  const workers = wm ? parseInt(wm[1]) : 3;
+  const running = remaining > 0 ? Math.min(workers, remaining) : 0;
+  return { done, total, todo: remaining - running, running };
+}
+
+function renderJobProgress(output) {
+  const p = parseJobProgress(output);
+  if (!p) return '';
+  const pct = Math.round((p.done / p.total) * 100);
+  return `<div class="job-progress">
+    <div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>
+    <div class="job-progress-counts">
+      <span><span class="dot dot-done"></span>${p.done} done</span>
+      ${p.running ? `<span><span class="dot dot-running"></span>${p.running} active</span>` : ''}
+      ${p.todo > 0 ? `<span><span class="dot dot-todo"></span>${p.todo} queued</span>` : ''}
+    </div>
+    <span>${pct}%</span>
+  </div>`;
+}
+
 function toggleJobLog(jobId, btn) {
   const wrap = btn.closest('.job-log-wrap');
   const collapsed = wrap.classList.toggle('collapsed');
@@ -657,6 +695,7 @@ async function pollJobs() {
           <span><b>${j.command}${esc(args)}</b></span>
           <span>${status} ${j.finished_at ? shortDate(j.finished_at) : 'running...'} ${killBtn}</span>
         </div>
+        ${renderJobProgress(j.output)}
         <div class="job-log-wrap ${collapsed ? 'collapsed' : ''}">
           <button class="job-log-toggle" onclick="toggleJobLog('${j.id}', this)">${collapsed ? '▶ Show log' : '▼ Hide log'}</button>
           <button class="btn btn-sm" style="font-size:11px;padding:2px 6px;opacity:0.7;margin-left:8px" onclick="copyLog(this)">Copy</button>
