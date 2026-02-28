@@ -156,6 +156,12 @@
           <button class="btn btn-sm" id="sched-triage-btn" onclick="toggleSchedule('triage')">Enable</button>
         </div>
         <button class="btn btn-yellow btn-sm" onclick="launchTriage()" style="width:100%">Run Triage</button>
+        <hr style="border:none;border-top:1px solid var(--border);margin:10px 0 8px">
+        <label>Triage single issue</label>
+        <div class="cmd-row">
+          <input type="text" id="triage-issue-id" placeholder="ENG-123" style="flex:1">
+          <button class="btn btn-yellow btn-sm" onclick="launchTriageSingle()">Go</button>
+        </div>
       </div>
     </div>
     <div class="cmd-group">
@@ -208,7 +214,6 @@
       </div>
     </div>
     <button class="btn btn-sm" onclick="runJob('sync')" data-tip="Archive issues no longer actionable in Linear" style="background:#1a2a1a;border-color:var(--green);color:var(--green)">Sync</button>
-    <button class="btn btn-teal btn-sm" onclick="runJob('notify_ready')" data-tip="Check PRs and notify reviewer when ready">Notify Ready</button>
     <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
       Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
     </button>
@@ -220,6 +225,7 @@
     <thead>
       <tr>
         <th>Issue</th>
+        <th>Creator</th>
         <th>PRs</th>
         <th>Status</th>
         <th>Complexity</th>
@@ -313,6 +319,7 @@ function render() {
 
     html += `<tr class="row ${isExpanded ? 'expanded' : ''}" onclick="toggleDetail('${t.issue_id}')">
       <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
+      <td style="font-size:12px">${esc(t.creator || '-')}</td>
       <td>${prLinks || '<span style="color:var(--text2)">-</span>'}</td>
       <td>${t.ready_notified_at ? `<span class="badge badge-ready" title="Reviewer notified ${shortDate(t.ready_notified_at)}">ready</span>` : `<span class="badge badge-${t.status}">${t.status}</span>`}${t.revision_count ? `<br><span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
       <td>${complexity}</td>
@@ -500,6 +507,13 @@ function launchTriage() {
   if (maxAge && maxAge !== '30') args.push('--max-age-days', maxAge);
   if (workers && workers !== '3') args.push('--workers', workers);
   closeAllCmds(); runJob('triage', args);
+}
+function launchTriageSingle() {
+  const id = document.getElementById('triage-issue-id').value.trim();
+  if (!id) return;
+  closeAllCmds();
+  runJob('triage', [id]);
+  document.getElementById('triage-issue-id').value = '';
 }
 function launchImpl() {
   const args = [];

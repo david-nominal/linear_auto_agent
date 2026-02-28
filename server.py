@@ -20,7 +20,7 @@ LOGS_DIR = DATA_DIR / "logs"
 UI_FILE = BASE_DIR / "ui.html"
 SCHEDULES_FILE = DATA_DIR / "schedules.json"
 
-SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep", "notify_ready", "sync")
+SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep", "sync")
 
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
@@ -147,7 +147,11 @@ def _load_all_tracking() -> list[dict]:
     for p in TRACKING_DIR.glob("*.json"):
         items.append(json.loads(p.read_text()))
     items.sort(key=lambda t: t.get("triaged_at", ""), reverse=True)
-    items.sort(key=lambda t: STATUS_ORDER.get(t.get("status", ""), 99))
+    def _sort_key(t):
+        if t.get("ready_notified_at"):
+            return 11
+        return STATUS_ORDER.get(t.get("status", ""), 99)
+    items.sort(key=_sort_key)
     return items
 
 
@@ -206,12 +210,15 @@ class Handler(SimpleHTTPRequestHandler):
         pass  # suppress default request logging
 
     def _json_response(self, data, status=200):
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(data).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
@@ -221,12 +228,15 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
 
         if path == "/":
-            content = UI_FILE.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
+            try:
+                content = UI_FILE.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            except BrokenPipeError:
+                pass
             return
 
         if path == "/api/issues":
@@ -377,7 +387,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path.startswith("/api/jobs/"):
             command = path.split("/")[3]
-            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification", "sweep", "notify_ready", "sync"):
+            if command not in ("triage", "implement", "revise", "push", "retry", "ask_clarification", "sweep", "sync"):
                 self._json_response({"error": f"unknown command: {command}"}, 400)
                 return
             body = self._read_body()

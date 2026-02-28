@@ -50,14 +50,11 @@ IMPL_TIMEOUT = 600
 DEFAULT_WORKERS = 3
 
 
-_start_time = time.monotonic()
 _log_lock = threading.Lock()
 
 
 def _ts() -> str:
-    elapsed = time.monotonic() - _start_time
-    m, s = divmod(int(elapsed), 60)
-    return f"{m:02d}:{s:02d}"
+    return datetime.now().strftime("%H:%M:%S")
 
 
 def log(msg: str, *, issue: str = "", file=None) -> None:
@@ -294,6 +291,7 @@ def fetch_issues(max_age_days: int | None = None) -> list[dict]:
                 team { key name }
                 state { name type }
                 labels { nodes { name } }
+                creator { name }
             }
         }
     }
@@ -330,6 +328,7 @@ def fetch_issues(max_age_days: int | None = None) -> list[dict]:
                 "state": node["state"]["name"],
                 "state_type": node["state"]["type"],
                 "labels": [l["name"] for l in node.get("labels", {}).get("nodes", [])],
+                "creator": node.get("creator", {}).get("name") if node.get("creator") else None,
             })
 
         if not issues_data["pageInfo"]["hasNextPage"]:
@@ -337,6 +336,56 @@ def fetch_issues(max_age_days: int | None = None) -> list[dict]:
         cursor = issues_data["pageInfo"]["endCursor"]
 
     return all_issues
+
+
+def fetch_issue_by_id(issue_id: str) -> dict | None:
+    """Fetch a single Linear issue by identifier (e.g. 'ENG-123'). Returns issue dict or None."""
+    match = re.match(r"^([A-Za-z]+)-(\d+)$", issue_id)
+    if not match:
+        return None
+    team_key = match.group(1).upper()
+    number = int(match.group(2))
+    query = """
+    query($teamKey: String!, $number: Float!) {
+        issues(
+            filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }
+            first: 1
+        ) {
+            nodes {
+                identifier title description url priority
+                team { key name }
+                state { name type }
+                labels { nodes { name } }
+                creator { name }
+            }
+        }
+    }
+    """
+    headers = {"Authorization": linear_api_key(), "Content-Type": "application/json"}
+    resp = requests.post(
+        LINEAR_API_URL,
+        json={"query": query, "variables": {"teamKey": team_key, "number": number}},
+        headers=headers, timeout=30,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+    nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
+    if not nodes:
+        return None
+    node = nodes[0]
+    return {
+        "id": node["identifier"],
+        "title": node["title"],
+        "description": node.get("description") or "",
+        "url": node["url"],
+        "priority": node.get("priority"),
+        "team": node["team"]["key"] if node.get("team") else None,
+        "state": node["state"]["name"],
+        "state_type": node["state"]["type"],
+        "labels": [l["name"] for l in node.get("labels", {}).get("nodes", [])],
+        "creator": node.get("creator", {}).get("name") if node.get("creator") else None,
+    }
 
 
 def fetch_issue_comments(issue_id: str) -> dict:
@@ -595,8 +644,10 @@ def run_cursor_agent(prompt: str, *, mode: str | None = None, workspace: str | N
         log_path = LOGS_DIR / f"{log_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if log_path.exists():
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            log_path = LOGS_DIR / f"{log_name}-{ts}.log"
+            idx = 1
+            while (LOGS_DIR / f"{log_name}-{idx}.log").exists():
+                idx += 1
+            log_path = LOGS_DIR / f"{log_name}-{idx}.log"
 
     issue_hint = ""
     if log_name:
@@ -1124,7 +1175,9 @@ ensure your changes stay consistent with the overall intent.
 - If a comment requests a code change, make the change.
 - If a comment is a question, answer it with a code change or clarifying code comment.
 - Run compilation and tests after making changes.
-- Commit your changes with message "fix: address review feedback for {id}"
+- Commit your changes with a message like "fix({id}): <brief summary of what you changed>". \
+The summary should be a concise description of the actual changes (e.g. "add null check for user input", \
+"switch to batch API for performance"), not a generic message like "address review feedback".
 - Do NOT push to remote. Do NOT create a PR.
 """
 
@@ -1186,7 +1239,9 @@ You are addressing self-review feedback on a git worktree.
 - Keep the original issue description and implementation plan in mind — \
 ensure your changes stay consistent with the overall intent.
 - Run compilation and tests after making changes.
-- Commit your changes with message "fix: address review feedback for {id}"
+- Commit your changes with a message like "fix({id}): <brief summary of what you changed>". \
+The summary should be a concise description of the actual changes (e.g. "add null check for user input", \
+"switch to batch API for performance"), not a generic message like "address review feedback".
 - Do NOT push to remote. Do NOT create a PR.
 """
 
@@ -1478,6 +1533,7 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
         "url": issue["url"],
         "team": issue.get("team"),
         "labels": issue.get("labels", []),
+        "creator": issue.get("creator"),
         "triaged_at": now_iso(),
         "decision": decision["decision"],
         "repos": repos,
@@ -1509,6 +1565,51 @@ def _triage_and_plan_issue(issue: dict, workspace: str) -> dict:
 def cmd_triage(args: argparse.Namespace) -> None:
     workspace = str(ensure_workspace())
     _fetch_repos()
+
+    explicit_ids = getattr(args, "issue_ids", None) or []
+    if explicit_ids:
+        log(f"Fetching {len(explicit_ids)} specific issue(s) from Linear...")
+        to_triage = []
+        for iid in explicit_ids:
+            issue = fetch_issue_by_id(iid)
+            if issue:
+                to_triage.append(issue)
+            else:
+                log(f"Could not find issue {iid} in Linear", file=sys.stderr)
+        if not to_triage:
+            log("No valid issues to triage.")
+            return
+
+        total = len(to_triage)
+        workers = getattr(args, "workers", DEFAULT_WORKERS)
+        log(f"Triaging {total} issue(s) with {workers} worker(s)...")
+        t0 = time.monotonic()
+        done = 0
+        counts: dict[str, int] = {}
+        auto_clarify = os.environ.get("AUTO_ASK_CLARIFICATION", "false").lower() in ("1", "true", "yes")
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_triage_and_plan_issue, issue, workspace): issue
+                       for issue in to_triage}
+            for future in as_completed(futures):
+                issue = futures[future]
+                try:
+                    tracking_data = future.result()
+                    if auto_clarify and tracking_data.get("status") == "needs_clarification":
+                        _post_clarification(tracking_data)
+                    save_tracking(issue["id"], tracking_data)
+                    decision = tracking_data.get("decision", "unknown")
+                    counts[decision] = counts.get(decision, 0) + 1
+                except Exception as exc:
+                    log(f"Triage failed with exception: {exc}", issue=issue["id"], file=sys.stderr)
+                    counts["error"] = counts.get("error", 0) + 1
+                done += 1
+                log(f"Progress: {done}/{total} triaged")
+
+        elapsed = time.monotonic() - t0
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1]))
+        log(f"Triage complete in {_fmt_duration(elapsed)}: {summary}")
+        return
 
     max_age = getattr(args, "max_age_days", None)
     log("Fetching issues from Linear...")
@@ -2387,6 +2488,14 @@ def cmd_revise(args: argparse.Namespace) -> None:
     elapsed = time.monotonic() - t0
     log(f"Revision complete in {_fmt_duration(elapsed)}")
 
+    # After revising, check if any pushed issues are now ready for review
+    pushed = [t for t in load_all_tracking().values() if t["status"] == "pushed"]
+    pushed = _check_pr_states(pushed)
+    if pushed:
+        notified = _notify_ready_issues(pushed)
+        if notified:
+            log(f"Notified {notified} issue(s) as ready for review.")
+
 
 READY_COOLDOWN_MINUTES = int(os.environ.get("READY_COOLDOWN_MINUTES", "60"))
 
@@ -2490,21 +2599,8 @@ def _is_pr_ready(pr_url: str, issue_id: str = "") -> bool:
     return True
 
 
-def cmd_notify_ready(args: argparse.Namespace) -> None:
-    """Check pushed PRs for readiness and tag reviewer when ready."""
-    tracked = load_all_tracking()
-
-    if args.issue_ids:
-        candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
-    else:
-        candidates = [t for t in tracked.values() if t["status"] == "pushed"]
-
-    candidates = _check_pr_states(candidates)
-
-    if not candidates:
-        log("No pushed issues to check for readiness.")
-        return
-
+def _notify_ready_issues(candidates: list[dict]) -> int:
+    """Check pushed PRs for readiness and tag reviewer. Returns count notified."""
     notified = 0
     for t in candidates:
         issue_id = t["issue_id"]
@@ -2533,6 +2629,25 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
         save_tracking(issue_id, t)
         notified += 1
 
+    return notified
+
+
+def cmd_notify_ready(args: argparse.Namespace) -> None:
+    """Check pushed PRs for readiness and tag reviewer when ready."""
+    tracked = load_all_tracking()
+
+    if args.issue_ids:
+        candidates = [tracked[iid] for iid in args.issue_ids if iid in tracked]
+    else:
+        candidates = [t for t in tracked.values() if t["status"] == "pushed"]
+
+    candidates = _check_pr_states(candidates)
+
+    if not candidates:
+        log("No pushed issues to check for readiness.")
+        return
+
+    notified = _notify_ready_issues(candidates)
     log(f"Notified {notified} issue(s) as ready for review.")
 
 
@@ -2586,42 +2701,36 @@ def cmd_sync(_args: argparse.Namespace) -> None:
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
-    """Full automated sweep: sync → triage → implement → push → revise → notify_ready."""
+    """Full automated sweep: sync → triage → implement → push → revise."""
     log("=" * 60)
-    log("SWEEP: Stage 1/6 — Sync with Linear")
+    log("SWEEP: Stage 1/5 — Sync with Linear")
     log("=" * 60)
     cmd_sync(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 2/6 — Triage")
+    log("SWEEP: Stage 2/5 — Triage")
     log("=" * 60)
     cmd_triage(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 3/6 — Implement")
+    log("SWEEP: Stage 3/5 — Implement")
     log("=" * 60)
     cmd_implement(args)
 
     log("=" * 60)
-    log("SWEEP: Stage 4/6 — Push")
+    log("SWEEP: Stage 4/5 — Push")
     log("=" * 60)
     push_args = argparse.Namespace(issue_ids=[], all=True)
     cmd_push(push_args)
 
     log("=" * 60)
-    log("SWEEP: Stage 5/6 — Revise")
+    log("SWEEP: Stage 5/5 — Revise (+ notify ready)")
     log("=" * 60)
     revise_args = argparse.Namespace(
         issue_ids=[], max_revisions=getattr(args, "max_revisions", DEFAULT_MAX_REVIEW_REVISIONS),
         workers=getattr(args, "workers", DEFAULT_WORKERS),
     )
     cmd_revise(revise_args)
-
-    log("=" * 60)
-    log("SWEEP: Stage 6/6 — Notify Ready")
-    log("=" * 60)
-    notify_args = argparse.Namespace(issue_ids=[])
-    cmd_notify_ready(notify_args)
 
     log("=" * 60)
     log("SWEEP complete.")
@@ -2652,6 +2761,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_triage = sub.add_parser("triage", help="Fetch and triage open Linear issues")
+    p_triage.add_argument("issue_ids", nargs="*", help="Specific issue identifiers to triage (e.g. ENG-123)")
     p_triage.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_triage.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     _add_workers_arg(p_triage)
@@ -2706,7 +2816,7 @@ def main():
     p_sync = sub.add_parser("sync", help="Sync tracking with Linear: archive issues no longer actionable")
     p_sync.set_defaults(func=cmd_sync)
 
-    p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → push → revise → notify_ready")
+    p_sweep = sub.add_parser("sweep", help="Full automated sweep: sync → triage → implement → push → revise")
     p_sweep.add_argument("--limit", type=int, default=None, help="Max active pipeline tasks (WIP limit)")
     p_sweep.add_argument("--max-age-days", type=int, default=None, help=f"Only consider issues updated in the last N days (default: {DEFAULT_MAX_AGE_DAYS})")
     p_sweep.add_argument("--max-revisions", type=int, default=DEFAULT_MAX_REVIEW_REVISIONS,
