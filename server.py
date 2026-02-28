@@ -148,7 +148,7 @@ def _load_all_tracking() -> list[dict]:
         items.append(json.loads(p.read_text()))
     items.sort(key=lambda t: t.get("triaged_at", ""), reverse=True)
     def _sort_key(t):
-        if t.get("ready_notified_at"):
+        if t.get("ready_notified_at") and t.get("status") == "pushed":
             return 11
         return STATUS_ORDER.get(t.get("status", ""), 99)
     items.sort(key=_sort_key)

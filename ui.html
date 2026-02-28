@@ -42,7 +42,7 @@
   .badge-approved { background: #1a3a5c; color: var(--blue); }
   .badge-implemented { background: #1a3826; color: var(--green); }
   .badge-pushed { background: #2a1a4e; color: var(--purple); }
-  .badge-completed { background: #1a3826; color: var(--green); }
+  .badge-completed { background: #3d1a2e; color: #f7a8c9; }
   .badge-canceled { background: #3d1416; color: var(--red); }
   .badge-denied { background: #3d1416; color: var(--red); }
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
@@ -332,7 +332,7 @@ function render() {
       <td><a class="issue-id" href="${t.url || '#'}" target="_blank" onclick="event.stopPropagation()">${t.issue_id}</a><br><span style="font-size:12px;color:var(--text2)">${esc(t.title || '')}</span></td>
       <td style="font-size:12px">${esc(t.creator || '-')}</td>
       <td>${prLinks || '<span style="color:var(--text2)">-</span>'}</td>
-      <td>${t.ready_notified_at ? `<span class="badge badge-ready" title="Reviewer notified ${shortDate(t.ready_notified_at)}">ready</span>` : `<span class="badge badge-${t.status}">${t.status}</span>`}${t.revision_count ? `<br><span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
+      <td>${t.ready_notified_at && t.status === 'pushed' ? `<span class="badge badge-ready" title="Reviewer notified ${shortDate(t.ready_notified_at)}">ready</span>` : `<span class="badge badge-${t.status}">${t.status}</span>`}${t.revision_count ? `<br><span style="font-size:11px;color:var(--text2)" title="Revision steps run">rev ×${t.revision_count}</span>` : ''}</td>
       <td>${complexity}</td>
       <td class="repos">${repos}</td>
       <td class="summary" title="${esc(summary)}">${esc(truncate(summary, 120))}</td>
