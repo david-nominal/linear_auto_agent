@@ -131,6 +131,17 @@
   .sched-active { position: relative; }
   .sched-dot { position: absolute; top: -2px; left: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 
+  /* Logs dropdown */
+  .logs-dropdown { position: relative; display: inline-block; }
+  .logs-dropdown-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text2); padding: 2px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+  .logs-dropdown-btn:hover { color: var(--text); background: var(--border); }
+  .logs-dropdown-content { display: none; position: absolute; right: 0; top: calc(100% + 4px); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; min-width: 180px; max-height: 280px; overflow-y: auto; z-index: 120; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .logs-dropdown-content.open { display: block; }
+  .logs-dropdown-content a { display: block; padding: 5px 12px; font-size: 12px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  .logs-dropdown-content a:hover { background: var(--surface2); }
+  .logs-group-label { padding: 6px 12px 2px; font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+  .logs-group-label:not(:first-child) { border-top: 1px solid var(--border); margin-top: 2px; }
+
   .empty { text-align: center; padding: 60px 20px; color: var(--text2); }
 </style>
 </head>
@@ -388,8 +399,8 @@ function renderDetail(t) {
       ${t.canceled_at ? `<span>Canceled: ${shortDate(t.canceled_at)}</span>` : ''}
       ${t.ready_notified_at ? `<span style="color:var(--green)">Reviewer notified: ${shortDate(t.ready_notified_at)}</span>` : ''}
       ${prHtml}
-      <span id="log-links-${t.issue_id}" style="display:contents"></span>
       <span style="margin-left:auto;display:flex;gap:6px">
+        <span id="log-links-${t.issue_id}"></span>
         <button class="btn btn-sm" onclick="event.stopPropagation(); openFullscreen('${t.issue_id}')">Expand</button>
         <button class="btn btn-sm" onclick="event.stopPropagation(); toggleDetail('${t.issue_id}')">Collapse</button>
       </span>
@@ -431,15 +442,32 @@ async function fetchLogLinks(issueId) {
     const files = await res.json();
     const el = document.getElementById('log-links-' + issueId);
     if (!el || !files.length) return;
-    const labels = { 'triage': 'triage', 'plan': 'plan' };
-    const links = files.map(f => {
+
+    const groups = {};
+    for (const f of files) {
       const name = f.replace(/\.log$/, '');
-      const href = `/api/logs/${encodeURIComponent(issueId)}/${encodeURIComponent(f)}`;
-      return `<a href="${href}" target="_blank" style="font-size:12px">${esc(name)}</a>`;
-    });
-    el.innerHTML = 'Logs: ' + links.join(' · ');
+      const cat = name.match(/^(triage|plan|backend|frontend|review|revise)/i)?.[1]?.toLowerCase() || 'other';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push({ name, file: f });
+    }
+
+    let inner = '';
+    for (const [cat, items] of Object.entries(groups)) {
+      inner += `<div class="logs-group-label">${esc(cat)}</div>`;
+      for (const item of items) {
+        const href = `/api/logs/${encodeURIComponent(issueId)}/${encodeURIComponent(item.file)}`;
+        inner += `<a href="${href}" target="_blank" onclick="event.stopPropagation()">${esc(item.name)}</a>`;
+      }
+    }
+
+    el.innerHTML = `<div class="logs-dropdown">
+      <button class="logs-dropdown-btn" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">Logs (${files.length}) ▾</button>
+      <div class="logs-dropdown-content">${inner}</div>
+    </div>`;
   } catch(e) {}
 }
+
+document.addEventListener('click', e => { if (!e.target.closest('.logs-dropdown')) document.querySelectorAll('.logs-dropdown-content.open').forEach(el => el.classList.remove('open')); });
 
 let fullscreenId = null;
 function openFullscreen(id) {
