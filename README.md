@@ -10,10 +10,10 @@ Existing AI coding tools (Cursor, Devin, Greptile) each handle a slice of the en
 - **No structured mass-tasking.** Cursor and Devin are on-demand for individual issues. They require lots of hand-holding from the person who triggered them (who might not even be the best suited person for the job like MissionOps) — no self-review, no triage.
 - **Nothing cross-repo.** AI can reason across backend + frontend, but current tools are scoped to a single repo. A split codebase shouldn't slow things down.
 
-Spiky fills these gaps with a **full deterministic pipeline**: Linear ticket → triage (easy / hard / needs clarification) → plan → implement → self-review + external review (Greptile, Devin, humans) → PR ready.
-Triage + Planning is done against both the BE and FE repo. If implementation requires it, both BE and FE PRs will be implemented (with FE linked to local version of typings), meaning it can more easily become clear how the BE changes impact the FE and whether they are the correct changes to make.
+Spiky fills these gaps with a **full, more deterministic pipeline**: Linear ticket → triage (easy / hard / needs clarification) → plan → implement → self-review + external review (Greptile, Devin, humans) → PR ready.
+Triage + Planning is done against both the BE and FE repo. A single ticket can produce coordinated BE + FE PRs where the frontend is validated against the actual backend types, not stale ones. This works by linking the FE locally to the new BE typings.
 
-The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Forcing a compilation, self-review, CI, and lint check is better than just instructing the agent to do it. Each stage (triage, plan, implement, revise) is a distinct checkpoint you can inspect, approve, or reject — not one long agent session that may drift. Every decision and log is visible via a web dashboard. The only human requirement left is review.
+The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Forcing a compilation, self-review, CI, and lint check is better than just instructing the agent to do it. Each stage (triage, plan, implement, revise) is a distinct checkpoint you can inspect, approve, or reject — not one long agent session that may drift. Every decision and log is visible via a web dashboard. 
 
 ## Setup
 
