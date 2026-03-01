@@ -42,7 +42,7 @@ flowchart LR
 
     LINEAR --> TRIAGE
 
-    TRIAGE -- "easy" --> PLAN["📝 Plan"]
+    TRIAGE -- "easy" --> PLAN["📝 Plan<br/>(backend / frontend / both)"]
     TRIAGE -- "medium" --> PLAN
     PLAN -- "easy" --> IMPLEMENT
     PLAN -- "medium" --> APPROVE{"👤 Human Revises<br/>/ Approves Plan"}
@@ -77,6 +77,7 @@ flowchart LR
     style FIX fill:#238636,stroke:#3fb950,color:#fff
     style FIX_REVIEW fill:#6e40c9,stroke:#a371f7,color:#fff
     style FIX_PUSH fill:#1a6dd4,stroke:#58a6ff,color:#fff
+    style CI fill:#d4a017,stroke:#e3b341,color:#000
     style NOTIFY fill:#238636,stroke:#3fb950,color:#fff
     style SKIPPED fill:#6e7681,stroke:#8b949e,color:#fff
     style GIVEUP fill:#da3633,stroke:#f85149,color:#fff

@@ -2,6 +2,19 @@
 
 Automated triage and implementation of Linear issues using Cursor Agent CLI.
 
+## Why Spiky?
+
+Existing AI coding tools (Cursor, Devin, Greptile) each handle a slice of the engineering workflow but nothing connects them end-to-end:
+
+- **No end-to-end loop.** Today the cycle sometimes is: tell Cursor/Devin to implement → push → Greptile leaves review comments → copy-paste comments back to Cursor → repeat. That feedback loop is entirely manual.
+- **No structured mass-tasking.** Cursor and Devin are on-demand for individual issues. They require lots of hand-holding from the person who triggered them (who might not even be the best suited person for the job like MissionOps) — no self-review, no triage.
+- **Nothing cross-repo.** AI can reason across backend + frontend, but current tools are scoped to a single repo. A split codebase shouldn't slow things down.
+
+Spiky fills these gaps with a **full deterministic pipeline**: Linear ticket → triage (easy / hard / needs clarification) → plan → implement → self-review + external review (Greptile, Devin, humans) → PR ready.
+Triage + Planning is done against both the BE and FE repo. If implementation requires it both BE and FE PR will be implemented (with FE linked to local version of typings), meaning it can more easily become clear how the BE changes impact the FE and whether they are the correct changes to make.
+
+The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Each stage is inspectable, debuggable, and easy to write as a Python service. Cross-repo PRs (BE + FE) are first-class. The only human requirement left is review.
+
 ## Setup
 
 1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
