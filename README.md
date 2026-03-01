@@ -13,7 +13,7 @@ Existing AI coding tools (Cursor, Devin, Greptile) each handle a slice of the en
 Spiky fills these gaps with a **full deterministic pipeline**: Linear ticket → triage (easy / hard / needs clarification) → plan → implement → self-review + external review (Greptile, Devin, humans) → PR ready.
 Triage + Planning is done against both the BE and FE repo. If implementation requires it, both BE and FE PRs will be implemented (with FE linked to local version of typings), meaning it can more easily become clear how the BE changes impact the FE and whether they are the correct changes to make.
 
-The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Each stage (triage, plan, implement, revise) is a distinct checkpoint you can inspect, approve, or reject — not one long agent session that may drift. Every decision and log is visible via a web dashboard. The only human requirement left is review.
+The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Forcing a compilation, self-review, CI, and lint check is better than just instructing the agent to do it. Each stage (triage, plan, implement, revise) is a distinct checkpoint you can inspect, approve, or reject — not one long agent session that may drift. Every decision and log is visible via a web dashboard. The only human requirement left is review.
 
 ## Setup
 
@@ -84,13 +84,14 @@ Conjure TypeScript and proto zip are built locally and linked into the galaxy wo
 
 ### Security model
 
-| Step       | Agent mode                    | Timeout | Permissions                        |
-|------------|-------------------------------|---------|-------------------------------------|
-| Fetch      | Python (no agent)             | —       | Linear API read-only               |
-| Triage     | `cursor agent --mode ask`     | 60s     | Read-only, no MCP, no edits        |
-| Plan       | `cursor agent --mode plan`    | 120s    | Read-only, no MCP, no edits        |
-| Implement  | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
-| Revise     | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
+| Step           | Agent mode                    | Timeout | Permissions                        |
+|----------------|-------------------------------|---------|-------------------------------------|
+| Fetch          | Python (no agent)             | —       | Linear API read-only               |
+| Triage         | `cursor agent --mode ask`     | 60s     | Read-only, no MCP, no edits        |
+| Plan           | `cursor agent --mode plan`    | 120s    | Read-only, no MCP, no edits        |
+| Implement      | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
+| Compile + Lint | Python (no agent)             | 300s    | Shell only, scoped to worktree     |
+| Revise         | `cursor agent --yolo`         | 600s    | Edit + shell, scoped to worktree, no MCP |
 
 ### Workflow
 
@@ -98,8 +99,9 @@ Conjure TypeScript and proto zip are built locally and linked into the galaxy wo
 2. **Plan** — for easy and medium issues, produces a concrete implementation plan with a short summary for PR descriptions
 3. **Review** — you review plans via `status`/`show` and `approve` the ones you want implemented
 4. **Implement** — implements approved issues on isolated git worktrees; for cross-repo issues, builds and links backend APIs locally before running the frontend agent (parallelized across issues)
-5. **Push** — pushes branches and creates PRs with concise descriptions
-6. **Revise** — fetches unresolved PR review comments (from humans, Devin, Greptile, etc.), runs an agent to address them, and pushes the fixes
+5. **Compile + Lint** — after each implementation or revision, runs `gradlew compileJava` + `spotlessCheck` (backend) or `pnpm build` + `pnpm lint` (frontend). If it fails, the agent is re-invoked with the error output to fix it (up to 2 retries)
+6. **Push** — pushes branches and creates PRs with concise descriptions
+7. **Revise** — fetches unresolved PR review comments (from humans, Devin, Greptile, etc.), runs an agent to address them, runs compile+lint again, and pushes the fixes
 
 ### Data layout
 
