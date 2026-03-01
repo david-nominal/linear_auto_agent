@@ -6,14 +6,14 @@ Automated triage and implementation of Linear issues using Cursor Agent CLI.
 
 Existing AI coding tools (Cursor, Devin, Greptile) each handle a slice of the engineering workflow but nothing connects them end-to-end:
 
-- **No end-to-end loop.** Today the cycle sometimes is: tell Cursor/Devin to implement → push → Greptile leaves review comments → copy-paste comments back to Cursor → repeat. That feedback loop is entirely manual.
+- **No end-to-end loop.** Today the cycle is sometimes: tell Cursor/Devin to implement → push → Greptile leaves review comments → copy-paste comments back to Cursor → repeat. That feedback loop is entirely manual.
 - **No structured mass-tasking.** Cursor and Devin are on-demand for individual issues. They require lots of hand-holding from the person who triggered them (who might not even be the best suited person for the job like MissionOps) — no self-review, no triage.
 - **Nothing cross-repo.** AI can reason across backend + frontend, but current tools are scoped to a single repo. A split codebase shouldn't slow things down.
 
 Spiky fills these gaps with a **full deterministic pipeline**: Linear ticket → triage (easy / hard / needs clarification) → plan → implement → self-review + external review (Greptile, Devin, humans) → PR ready.
-Triage + Planning is done against both the BE and FE repo. If implementation requires it both BE and FE PR will be implemented (with FE linked to local version of typings), meaning it can more easily become clear how the BE changes impact the FE and whether they are the correct changes to make.
+Triage + Planning is done against both the BE and FE repo. If implementation requires it, both BE and FE PRs will be implemented (with FE linked to local version of typings), meaning it can more easily become clear how the BE changes impact the FE and whether they are the correct changes to make.
 
-The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Each stage is inspectable, debuggable, and easy to write as a Python service. Cross-repo PRs (BE + FE) are first-class. The only human requirement left is review.
+The bet is that AI isn't ready for fully autonomous long-horizon agents — structured, observable, stage-based orchestration works better today. Each stage (triage, plan, implement, revise) is a distinct checkpoint you can inspect, approve, or reject — not one long agent session that may drift. Every decision and log is visible via a web dashboard. The only human requirement left is review.
 
 ## Setup
 
@@ -125,3 +125,21 @@ Add to crontab for periodic triage:
 ```bash
 0 */6 * * * cd /path/to/linear_auto_agent && ./run.sh triage --limit 10 >> data/logs/cron.log 2>&1
 ```
+
+## Future Extensions
+
+**Broader pipeline coverage:**
+- Expand the definition of E2E to the left — auto-create Linear tickets from Slack threads, Notion docs, or codebase crawling
+- Take over existing PRs (not just ones Spiky created)
+- Respond to PR review comments conversationally, not just fix them
+
+**Smarter agent behavior:**
+- Push back against review comments when they're wrong or out of scope
+- Self-cancel tasks that become too complex mid-implementation
+- Self-review that flags excessive complexity before requesting human review
+
+**Integrations:**
+- Auto-tag the correct reviewer based on code ownership
+- Post screenshots/videos of changes and use them as part of review
+- Slack notifications for pipeline progress and review requests
+- Run 24/7 on AWS as a persistent service

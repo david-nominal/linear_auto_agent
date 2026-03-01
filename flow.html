@@ -33,7 +33,7 @@ flowchart LR
     IMPLEMENT["⚡ Implement"]
     SELF_REVIEW{"🔎 Self-Review"}
     PUSH["🚀 Push PR<br/>(backend / frontend / both)"]
-    FETCH_COMMENTS["📥 Fetch PR Comments<br/>(Greptile, Devin, Human)"]
+    FETCH_COMMENTS["📥 Fetch <br> - PR Comments (Greptile, Devin, Human)" <br> - CI status]
     FIX["🔧 Fix Issues"]
     FIX_REVIEW{"🔎 Self-Review"}
     FIX_PUSH["🚀 Push Fixes"]
@@ -57,7 +57,7 @@ flowchart LR
 
     PUSH --> FETCH_COMMENTS
 
-    FETCH_COMMENTS -- "no more relevant comments" --> NOTIFY
+    FETCH_COMMENTS -- "no more relevant comments<br/>CI passing" --> NOTIFY
     FETCH_COMMENTS -- "max revisions<br/>exceeded" --> GIVEUP
     FETCH_COMMENTS -- "comments found" --> FIX
     FIX --> FIX_REVIEW
@@ -77,7 +77,6 @@ flowchart LR
     style FIX fill:#238636,stroke:#3fb950,color:#fff
     style FIX_REVIEW fill:#6e40c9,stroke:#a371f7,color:#fff
     style FIX_PUSH fill:#1a6dd4,stroke:#58a6ff,color:#fff
-    style CI fill:#d4a017,stroke:#e3b341,color:#000
     style NOTIFY fill:#238636,stroke:#3fb950,color:#fff
     style SKIPPED fill:#6e7681,stroke:#8b949e,color:#fff
     style GIVEUP fill:#da3633,stroke:#f85149,color:#fff
