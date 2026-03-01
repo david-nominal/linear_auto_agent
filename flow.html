@@ -32,8 +32,8 @@ flowchart LR
     CLARIFY["❓ Post Clarification<br/>Comment on Linear"]
     IMPLEMENT["⚡ Implement"]
     SELF_REVIEW{"🔎 Self-Review"}
-    PUSH["🚀 Push PR"]
-    FETCH_COMMENTS["📥 Fetch PR Comments<br/>(Greptile, Devin)"]
+    PUSH["🚀 Push PR<br/>(backend / frontend / both)"]
+    FETCH_COMMENTS["📥 Fetch PR Comments<br/>(Greptile, Devin, Human)"]
     FIX["🔧 Fix Issues"]
     FIX_REVIEW{"🔎 Self-Review"}
     FIX_PUSH["🚀 Push Fixes"]
@@ -57,13 +57,13 @@ flowchart LR
 
     PUSH --> FETCH_COMMENTS
 
-    FETCH_COMMENTS -- "no comments /<br/>approved" --> NOTIFY
+    FETCH_COMMENTS -- "no more relevant comments" --> NOTIFY
     FETCH_COMMENTS -- "max revisions<br/>exceeded" --> GIVEUP
     FETCH_COMMENTS -- "comments found" --> FIX
     FIX --> FIX_REVIEW
     FIX_REVIEW -- "issues found" --> FIX
     FIX_REVIEW -- "looks good" --> FIX_PUSH
-    FIX_PUSH --> FETCH_COMMENTS
+    FIX_PUSH -- "next revision" --> FETCH_COMMENTS
 
     style LINEAR fill:#1a6dd4,stroke:#58a6ff,color:#fff
     style TRIAGE fill:#6e40c9,stroke:#a371f7,color:#fff
