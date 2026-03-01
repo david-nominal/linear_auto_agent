@@ -31,10 +31,12 @@ flowchart LR
     TRIAGE{"🔍 Triage"}
     CLARIFY["❓ Post Clarification<br/>Comment on Linear"]
     IMPLEMENT["⚡ Implement"]
+    COMPILE{"🛠️ Compile + Lint<br/>(gradlew / pnpm)"}
     SELF_REVIEW{"🔎 Self-Review"}
     PUSH["🚀 Push PR<br/>(backend / frontend / both)"]
     FETCH_COMMENTS["📥 Fetch <br> - PR Comments (Greptile, Devin, Human)" <br> - CI status]
     FIX["🔧 Fix Issues"]
+    FIX_COMPILE{"🛠️ Compile + Lint"}
     FIX_REVIEW{"🔎 Self-Review"}
     FIX_PUSH["🚀 Push Fixes"]
     NOTIFY["✅ Notify Reviewer"]
@@ -51,7 +53,9 @@ flowchart LR
     TRIAGE -- "needs_clarification" --> CLARIFY
     CLARIFY -.-> LINEAR
 
-    IMPLEMENT --> SELF_REVIEW
+    IMPLEMENT --> COMPILE
+    COMPILE -- "fails" --> IMPLEMENT
+    COMPILE -- "passes" --> SELF_REVIEW
     SELF_REVIEW -- "issues found" --> IMPLEMENT
     SELF_REVIEW -- "looks good" --> PUSH
 
@@ -60,7 +64,9 @@ flowchart LR
     FETCH_COMMENTS -- "no more relevant comments<br/>CI passing" --> NOTIFY
     FETCH_COMMENTS -- "max revisions<br/>exceeded" --> GIVEUP
     FETCH_COMMENTS -- "comments found" --> FIX
-    FIX --> FIX_REVIEW
+    FIX --> FIX_COMPILE
+    FIX_COMPILE -- "fails" --> FIX
+    FIX_COMPILE -- "passes" --> FIX_REVIEW
     FIX_REVIEW -- "issues found" --> FIX
     FIX_REVIEW -- "looks good" --> FIX_PUSH
     FIX_PUSH -- "next revision" --> FETCH_COMMENTS
@@ -71,10 +77,12 @@ flowchart LR
     style PLAN fill:#d4a017,stroke:#e3b341,color:#000
     style APPROVE fill:#6e40c9,stroke:#a371f7,color:#fff
     style IMPLEMENT fill:#238636,stroke:#3fb950,color:#fff
+    style COMPILE fill:#d4a017,stroke:#e3b341,color:#000
     style SELF_REVIEW fill:#6e40c9,stroke:#a371f7,color:#fff
     style PUSH fill:#1a6dd4,stroke:#58a6ff,color:#fff
     style FETCH_COMMENTS fill:#d4a017,stroke:#e3b341,color:#000
     style FIX fill:#238636,stroke:#3fb950,color:#fff
+    style FIX_COMPILE fill:#d4a017,stroke:#e3b341,color:#000
     style FIX_REVIEW fill:#6e40c9,stroke:#a371f7,color:#fff
     style FIX_PUSH fill:#1a6dd4,stroke:#58a6ff,color:#fff
     style NOTIFY fill:#238636,stroke:#3fb950,color:#fff

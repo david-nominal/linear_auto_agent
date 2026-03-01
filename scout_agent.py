@@ -47,6 +47,8 @@ REPOS = {
 TRIAGE_TIMEOUT = 60
 PLAN_TIMEOUT = 120
 IMPL_TIMEOUT = 600
+COMPILE_LINT_TIMEOUT = 300
+MAX_COMPILE_LINT_RETRIES = 2
 DEFAULT_WORKERS = 3
 
 
@@ -1245,7 +1247,91 @@ The summary should be a concise description of the actual changes (e.g. "add nul
 - Do NOT push to remote. Do NOT create a PR.
 """
 
+COMPILE_LINT_FIX_PROMPT = """\
+The compile/lint step failed after your last changes. Fix these errors:
+
+{errors}
+
+## Instructions
+
+- Fix every error listed above.
+- Do NOT change unrelated code.
+- Commit your fixes.
+- Do NOT push to remote. Do NOT create a PR.
+"""
+
 DEFAULT_MAX_REVIEW_REVISIONS = 10
+
+
+def _run_compile_lint(worktree_path: str, repo_key: str, issue_id: str) -> str | None:
+    """Run compile + lint checks for a repo. Returns error output if failed, None if OK."""
+    errors: list[str] = []
+
+    if repo_key == "backend":
+        log(f"{repo_key}: running spotlessApply...", issue=issue_id)
+        subprocess.run(
+            ["./gradlew", "spotlessApply"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=COMPILE_LINT_TIMEOUT,
+        )
+
+        log(f"{repo_key}: running compileJava...", issue=issue_id)
+        result = subprocess.run(
+            ["./gradlew", "compileJava"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=COMPILE_LINT_TIMEOUT,
+        )
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr)[-3000:]
+            errors.append(f"./gradlew compileJava FAILED:\n{output}")
+
+    elif repo_key == "frontend":
+        log(f"{repo_key}: running pnpm build...", issue=issue_id)
+        result = subprocess.run(
+            ["pnpm", "build"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=COMPILE_LINT_TIMEOUT,
+        )
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr)[-3000:]
+            errors.append(f"pnpm build FAILED:\n{output}")
+
+        log(f"{repo_key}: running pnpm lint...", issue=issue_id)
+        result = subprocess.run(
+            ["pnpm", "lint"],
+            capture_output=True, text=True, cwd=worktree_path, timeout=COMPILE_LINT_TIMEOUT,
+        )
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr)[-3000:]
+            errors.append(f"pnpm lint FAILED:\n{output}")
+
+    if errors:
+        combined = "\n\n".join(errors)
+        log(f"{repo_key}: compile/lint failed", issue=issue_id)
+        return combined
+    log(f"{repo_key}: compile/lint passed", issue=issue_id)
+    return None
+
+
+def _compile_lint_loop(worktree_path: str, repo_key: str, issue_id: str,
+                       log_prefix: str) -> bool:
+    """Run compile+lint and, on failure, invoke the agent to fix errors. Returns True if eventually passes."""
+    for attempt in range(1, MAX_COMPILE_LINT_RETRIES + 1):
+        cl_errors = _run_compile_lint(worktree_path, repo_key, issue_id)
+        if cl_errors is None:
+            return True
+
+        log(f"{repo_key}: compile/lint fix attempt {attempt}/{MAX_COMPILE_LINT_RETRIES}...", issue=issue_id)
+        prompt = COMPILE_LINT_FIX_PROMPT.format(errors=cl_errors)
+        model = os.environ.get("IMPL_MODEL") or None
+        log_name = f"{issue_id}/{log_prefix}-compile-fix-{attempt}"
+        exit_code, _ = run_cursor_agent(
+            prompt, workspace=worktree_path, yolo=True, sandbox=True,
+            log_name=log_name, timeout=IMPL_TIMEOUT, model=model,
+        )
+        if exit_code != 0:
+            log(f"{repo_key}: compile/lint fix agent failed (exit={exit_code})", issue=issue_id)
+            return False
+
+    final_errors = _run_compile_lint(worktree_path, repo_key, issue_id)
+    return final_errors is None
 
 
 def resolve_pr_threads(thread_ids: list[str], issue_id: str = "") -> int:
@@ -1842,6 +1928,11 @@ def _review_revise_loop(tracking: dict, repo_key: str, max_revisions: int) -> in
             log(f"{repo_key}: review-revise failed (exit={exit_code}), stopping loop", issue=issue_id)
             break
 
+        if not _compile_lint_loop(worktree_path, repo_key, issue_id,
+                                  log_prefix=f"{repo_key}-review-revise-{rev_count}"):
+            log(f"{repo_key}: compile/lint still failing after retries, stopping loop", issue=issue_id)
+            break
+
     tracking["revision_count"] = tracking.get("revision_count", 0) + rev_count
     return rev_count
 
@@ -2315,6 +2406,10 @@ def _revise_repo(tracking: dict, repo_key: str, extra_context: str = "", rev_num
         if log_file.exists():
             log(f"  Log: {log_file}", issue=issue_id)
         return None
+
+    if not _compile_lint_loop(worktree_path, repo_key, issue_id,
+                              log_prefix=f"{repo_key}-revise-{rev_num}"):
+        log(f"{repo_key}: compile/lint still failing after retries", issue=issue_id)
 
     log(f"{repo_key}: pushing revision...", issue=issue_id)
     push_result = subprocess.run(
