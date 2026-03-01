@@ -46,6 +46,7 @@
   .badge-canceled { background: #3d1416; color: var(--red); }
   .badge-denied { background: #3d1416; color: var(--red); }
   .badge-failed, .badge-triage_failed { background: #3d1416; color: var(--red); }
+  .badge-revisions_exceeded { background: #3d2e00; color: var(--yellow); }
   .badge-needs_clarification, .badge-complex_skip, .badge-easy, .badge-medium { background: #21262d; color: var(--gray); }
   .badge-asked_clarification { background: #3d2e00; color: var(--yellow); }
   .badge-ready { background: #1a3826; color: var(--green); border: 1px solid var(--green); }
@@ -55,7 +56,11 @@
 
   /* Table */
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  th { text-align: left; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { color: var(--text); }
+  th .sort-arrow { margin-left: 4px; font-size: 10px; opacity: 0.5; }
+  th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+  th:last-child { cursor: default; }
   td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: top; }
   tr.row { cursor: pointer; transition: background 0.1s; }
   tr.row:hover { background: var(--surface); }
@@ -224,7 +229,7 @@
         <button class="btn btn-sm" onclick="launchSweep()" style="width:100%;background:#2a1a4e;border-color:var(--purple);color:var(--purple)">Run Sweep</button>
       </div>
     </div>
-    <button class="btn btn-sm" onclick="runJob('sync')" data-tip="Archive issues no longer actionable in Linear" style="background:#1a2a1a;border-color:var(--green);color:var(--green)">Sync</button>
+    <!-- <button class="btn btn-sm" onclick="runJob('sync')" data-tip="Archive issues no longer actionable in Linear" style="background:#1a2a1a;border-color:var(--green);color:var(--green)">Sync</button> -->
     <button class="btn jobs-toggle" onclick="toggleJobs()" id="jobsToggleBtn">
       Jobs <span class="jobs-badge" id="jobsBadge" style="display:none">0</span>
     </button>
@@ -235,13 +240,13 @@
   <table>
     <thead>
       <tr>
-        <th>Issue</th>
-        <th>Creator</th>
-        <th>PRs</th>
-        <th>Status</th>
-        <th>Complexity</th>
-        <th>Repos</th>
-        <th>Summary</th>
+        <th onclick="sortBy('issue_id')">Issue <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('creator')">Creator <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('prs')">PRs <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('status')">Status <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('complexity')">Complexity <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('repos')">Repos <span class="sort-arrow">▲</span></th>
+        <th onclick="sortBy('summary')">Summary <span class="sort-arrow">▲</span></th>
         <th></th>
       </tr>
     </thead>
@@ -276,6 +281,57 @@ let refreshTimer = null;
 let jobsTimer = null;
 let runningIssues = new Set();
 let expandedJobs = new Set();
+let sortCol = null;
+let sortAsc = true;
+
+const STATUS_SORT = {
+  'awaiting_approval': 0, 'approved': 1, 'implemented': 2, 'pushed': 3,
+  'ready': 4, 'completed': 5, 'revisions_exceeded': 6, 'failed': 7, 'triage_failed': 8,
+  'easy': 9, 'medium': 10, 'needs_clarification': 11, 'asked_clarification': 12,
+  'complex_skip': 13, 'canceled': 14, 'archived': 15, 'denied': 16,
+};
+const COMPLEXITY_SORT = { 'easy': 0, 'medium': 1, 'complex_skip': 2 };
+
+function getDisplayStatus(t) {
+  return (t.ready_notified_at && t.status === 'pushed') ? 'ready' : t.status;
+}
+
+function getSortValue(t, col) {
+  switch (col) {
+    case 'issue_id': return t.issue_id || '';
+    case 'creator': return (t.creator || '').toLowerCase();
+    case 'prs': return Object.keys(t.pull_requests || {}).filter(k => t.pull_requests[k]?.url).length;
+    case 'status': {
+      const s = getDisplayStatus(t);
+      return STATUS_SORT[s] ?? 99;
+    }
+    case 'complexity': return COMPLEXITY_SORT[t.decision] ?? 99;
+    case 'repos': return (t.repos || []).join(', ');
+    case 'summary': {
+      if (t.status === 'awaiting_approval') return t.plan_summary || t.plan || '';
+      return t.reasoning || '';
+    }
+    default: return '';
+  }
+}
+
+function sortBy(col) {
+  if (sortCol === col) { sortAsc = !sortAsc; }
+  else { sortCol = col; sortAsc = true; }
+  render();
+}
+
+function applySorting(items) {
+  if (!sortCol) return items;
+  const sorted = [...items];
+  sorted.sort((a, b) => {
+    let va = getSortValue(a, sortCol), vb = getSortValue(b, sortCol);
+    if (typeof va === 'number' && typeof vb === 'number') return sortAsc ? va - vb : vb - va;
+    va = String(va); vb = String(vb);
+    return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+  });
+  return sorted;
+}
 
 async function fetchIssues() {
   try {
@@ -305,6 +361,21 @@ function render() {
   if (!issues.length) { tbody.innerHTML = ''; empty.style.display = ''; empty.textContent = 'No tracked issues. Run triage first.'; return; }
   empty.style.display = 'none';
 
+  document.querySelectorAll('thead th').forEach(th => {
+    th.classList.remove('sorted');
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = '▲';
+  });
+  if (sortCol) {
+    const cols = ['issue_id','creator','prs','status','complexity','repos','summary'];
+    const idx = cols.indexOf(sortCol);
+    if (idx >= 0) {
+      const th = document.querySelectorAll('thead th')[idx];
+      th.classList.add('sorted');
+      th.querySelector('.sort-arrow').textContent = sortAsc ? '▲' : '▼';
+    }
+  }
+
   const scrollPositions = {};
   tbody.querySelectorAll('.detail-row pre, .detail-row textarea').forEach(el => {
     if (el.scrollTop > 0) {
@@ -314,8 +385,9 @@ function render() {
     }
   });
 
+  const sorted = applySorting(issues);
   let html = '';
-  for (const t of issues) {
+  for (const t of sorted) {
     const isExpanded = expandedId === t.issue_id;
     const repos = (t.repos || []).join(', ') || '-';
     const complexity = t.decision || '-';
@@ -755,8 +827,8 @@ async function pollJobs() {
   } catch(e) {}
 }
 
-function pauseRefresh() { clearInterval(refreshTimer); refreshTimer = null; }
-function resumeRefresh() { if (!refreshTimer) refreshTimer = setInterval(fetchIssues, 5000); }
+function pauseRefresh() {}
+function resumeRefresh() {}
 
 function copyLog(btn) {
   const pre = btn.parentElement.querySelector('pre');
@@ -770,9 +842,6 @@ function timeDiff(a, b) { const s = (new Date(b) - new Date(a)) / 1000; return s
 
 fetchIssues();
 fetchSchedules();
-refreshTimer = setInterval(fetchIssues, 5000);
-setInterval(() => { if (jobsPanelOpen) pollJobs(); }, 5000);
-setInterval(fetchSchedules, 15000);
 </script>
 </body>
 </html>

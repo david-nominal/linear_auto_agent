@@ -24,9 +24,9 @@ SCHEDULABLE_COMMANDS = ("triage", "implement", "revise", "push", "retry", "sweep
 
 STATUS_ORDER = {
     "awaiting_approval": 0, "approved": 1, "implemented": 2, "pushed": 3,
-    "failed": 4, "triage_failed": 5, "easy": 6, "medium": 7,
-    "needs_clarification": 8, "complex_skip": 9, "asked_clarification": 10,
-    "completed": 11, "canceled": 12, "archived": 13, "denied": 14,
+    "completed": 4, "revisions_exceeded": 5, "failed": 6, "triage_failed": 7,
+    "easy": 8, "medium": 9, "needs_clarification": 10, "asked_clarification": 11,
+    "complex_skip": 12, "canceled": 13, "archived": 14, "denied": 15,
 }
 
 # Job tracking (in-memory for current session)
@@ -149,7 +149,7 @@ def _load_all_tracking() -> list[dict]:
     items.sort(key=lambda t: t.get("triaged_at", ""), reverse=True)
     def _sort_key(t):
         if t.get("ready_notified_at") and t.get("status") == "pushed":
-            return 11
+            return 3.5  # after pushed (3), before completed (4)
         return STATUS_ORDER.get(t.get("status", ""), 99)
     items.sort(key=_sort_key)
     return items

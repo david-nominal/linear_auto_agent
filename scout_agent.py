@@ -2106,6 +2106,16 @@ def cmd_push(args: argparse.Namespace) -> None:
                 ["git", "-C", worktree_path, "push", "-u", "origin", branch],
                 capture_output=True, text=True,
             )
+            if push_result.returncode != 0 and "non-fast-forward" in push_result.stderr:
+                log(f"{repo_key}: remote branch ahead, pulling with rebase...", issue=issue_id)
+                subprocess.run(
+                    ["git", "-C", worktree_path, "pull", "--rebase", "origin", branch],
+                    capture_output=True, text=True,
+                )
+                push_result = subprocess.run(
+                    ["git", "-C", worktree_path, "push", "-u", "origin", branch],
+                    capture_output=True, text=True,
+                )
             if push_result.returncode != 0:
                 log(f"{repo_key}: push failed: {push_result.stderr.strip()}", issue=issue_id)
                 continue
@@ -2454,11 +2464,20 @@ def cmd_revise(args: argparse.Namespace) -> None:
 
     max_revisions = getattr(args, "max_revisions", None)
     if max_revisions is not None:
-        before = len(candidates)
-        candidates = [t for t in candidates if t.get("revision_count", 0) < max_revisions]
-        skipped = before - len(candidates)
-        if skipped:
-            log(f"Skipped {skipped} issue(s) already at {max_revisions}+ revisions")
+        remaining = []
+        exceeded = 0
+        for t in candidates:
+            if t.get("revision_count", 0) >= max_revisions:
+                t["status"] = "revisions_exceeded"
+                t["revisions_exceeded_at"] = now_iso()
+                save_tracking(t["issue_id"], t)
+                log(f"Marked revisions_exceeded ({t.get('revision_count', 0)}/{max_revisions})", issue=t["issue_id"])
+                exceeded += 1
+            else:
+                remaining.append(t)
+        candidates = remaining
+        if exceeded:
+            log(f"Marked {exceeded} issue(s) as revisions_exceeded")
 
     if not candidates:
         log("No pushed issues with PRs to revise.")
@@ -2652,7 +2671,7 @@ def cmd_notify_ready(args: argparse.Namespace) -> None:
 
 
 ACTIVE_PIPELINE_STATUSES = {"awaiting_approval", "approved", "implemented", "pushed"}
-TERMINAL_STATUSES = {"completed", "canceled", "archived", "denied"}
+TERMINAL_STATUSES = {"completed", "canceled", "archived", "denied", "revisions_exceeded"}
 NON_ACTIONABLE_STATE_TYPES = {"completed", "canceled"}
 
 
