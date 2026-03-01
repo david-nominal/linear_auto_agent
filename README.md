@@ -132,6 +132,7 @@ Add to crontab for periodic triage:
 - Expand the definition of E2E to the left — auto-create Linear tickets from Slack threads, Notion docs, or codebase crawling
 - Take over existing PRs (not just ones Spiky created)
 - Respond to PR review comments conversationally, not just fix them
+- Run user-initated and not just mass from linear
 
 **Smarter agent behavior:**
 - Push back against review comments when they're wrong or out of scope
